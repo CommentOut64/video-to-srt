@@ -1,4 +1,6 @@
 # Video-to-SRT 字幕生成工具
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FCommentOut64%2Fvideo_to_srt.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2FCommentOut64%2Fvideo_to_srt?ref=badge_shield)
+
 
 > 仅供学习与研究，禁止任何形式的商业使用。作者不对使用后果承担责任。
 
@@ -219,3 +221,7 @@ MIT License
 * [OpenAI Whisper](vscode-file://vscode-app/d:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html) - 基础的语音识别模型
 * [FFmpeg](vscode-file://vscode-app/d:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html) - 视频和音频处理
 * 所有开源库的贡献者们
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FCommentOut64%2Fvideo_to_srt.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2FCommentOut64%2Fvideo_to_srt?ref=badge_large)
