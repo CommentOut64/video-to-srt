@@ -25,7 +25,7 @@ SOFTWARE.
 第三方依赖许可证汇总
 （详见项目根目录下 `THIRD_PARTY_LICENSES.txt`）
 
-本项目使用了以下主要开源组件（完整列表见 `requirements.txt` :contentReference[oaicite:2]{index=2}）及其许可证类型示例：
+本项目使用了以下主要开源组件（完整列表见 `requirements.txt`）及其许可证类型示例：
 
 - PyTorch（BSD 3-Clause “New”/“Revised” License）  
 - WhisperX（BSD 4-Clause License）  
