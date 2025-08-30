@@ -3,7 +3,13 @@
     "allow": [
       "Bash(npm install:*)",
       "Bash(npm run dev:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(curl:*)",
+      "Bash(uvicorn:*)",
+      "Bash(BACKEND_PORT=8002 npm run dev)",
+      "Bash(taskkill:*)"
     ],
     "deny": [],
     "ask": [],

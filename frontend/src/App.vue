@@ -18,86 +18,162 @@
       <el-row :gutter="20" justify="center">
         <el-col :xs="24" :sm="20" :md="16" :lg="14" :xl="12">
           
-          <!-- 1. 文件上传区域 -->
+          <!-- 1. 文件选择区域 -->
           <el-card class="upload-card" shadow="hover">
             <template #header>
               <div class="card-header">
-                <el-icon><Upload /></el-icon>
-                <span>1. 上传媒体文件</span>
+                <el-icon><FolderOpened /></el-icon>
+                <span>1. 选择媒体文件</span>
+                <div style="margin-left: auto; display: flex; gap: 8px;">
+                  <el-button 
+                    type="success" 
+                    size="small"
+                    @click="toggleUploadMode"
+                    :disabled="creating || uploading"
+                  >
+                    <el-icon><Upload /></el-icon>
+                    {{ showUpload ? '浏览文件' : '上传文件' }}
+                  </el-button>
+                  <el-button 
+                    type="primary" 
+                    size="small"
+                    @click="loadFiles"
+                    :loading="loadingFiles"
+                    v-if="!showUpload"
+                  >
+                    <el-icon><Refresh /></el-icon>
+                    刷新
+                  </el-button>
+                </div>
               </div>
             </template>
             
-            <div class="upload-area">
-              <el-upload
-                drag
-                :auto-upload="false"
-                :show-file-list="false"
-                accept="video/*,audio/*"
-                @change="onFileChange"
-                :disabled="uploading"
-              >
-                <el-icon class="upload-icon"><UploadFilled /></el-icon>
-                <div class="upload-text">
-                  点击或拖拽文件到此处上传
-                </div>
-                <div class="upload-hint">
-                  支持 MP4, AVI, MKV, MOV, WMV 等格式
-                </div>
-              </el-upload>
-              
-              <!-- 已选择文件信息 -->
-              <div v-if="fileName" class="file-info">
-                <el-tag type="success" size="large">
-                  <el-icon><Document /></el-icon>
-                  {{ fileName }}
-                  <span v-if="fileSize">({{ formatFileSize(fileSize) }})</span>
-                </el-tag>
-              </div>
-
-              <!-- 上传按钮 -->
-              <div class="upload-actions">
-                <el-button 
-                  type="primary" 
-                  size="large"
-                  :loading="uploading"
-                  :disabled="!file || uploading"
-                  @click="doUpload"
+            <div class="file-selection-area">
+              <!-- 上传模式 -->
+              <div v-if="showUpload" class="upload-mode">
+                <el-upload
+                  class="upload-area"
+                  drag
+                  :auto-upload="false"
+                  :on-change="handleUpload"
+                  :show-file-list="false"
+                  :disabled="uploading"
+                  accept=".mp4,.avi,.mkv,.mov,.wmv,.flv,.webm,.m4v,.mp3,.wav,.flac,.aac,.ogg,.m4a,.wma"
                 >
-                  <el-icon v-if="!uploading"><Upload /></el-icon>
-                  {{ uploading ? "上传中..." : "上传文件" }}
-                </el-button>
+                  <div class="upload-content">
+                    <el-icon class="upload-icon"><UploadFilled /></el-icon>
+                    <div class="upload-text" v-if="!uploading">
+                      拖拽文件到此处，或<em>点击选择</em>
+                    </div>
+                    <div class="upload-text" v-else>
+                      正在上传... {{ uploadProgress }}%
+                    </div>
+                    <div class="upload-hint">
+                      支持格式：MP4, AVI, MKV, MOV, WMV, MP3, WAV, FLAC 等
+                    </div>
+                  </div>
+                </el-upload>
                 
-                <el-button 
-                  v-if="jobId && !uploading"
-                  type="success"
-                  size="large"
-                  @click="resetUpload"
-                >
-                  <el-icon><RefreshRight /></el-icon>
-                  重新上传
-                </el-button>
-              </div>
-
-              <!-- 上传进度 -->
-              <div v-if="uploading" class="upload-progress">
+                <!-- 上传进度条 -->
                 <el-progress
+                  v-if="uploading"
                   :percentage="uploadProgress"
                   :stroke-width="8"
-                  status="success"
+                  status="active"
+                  style="margin-top: 16px;"
                 />
-                <p class="progress-text">
-                  上传进度: {{ uploadProgress }}% ({{ formatSpeed(uploadSpeed) }})
-                </p>
+              </div>
+              
+              <!-- 浏览模式 -->
+              <div v-else class="browse-mode">
+                <!-- 目录提示 -->
+                <el-alert
+                  title="请将视频/音频文件放入 input 目录中"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                >
+                  <template #default>
+                    <p>支持格式：MP4, AVI, MKV, MOV, WMV, MP3, WAV, FLAC 等</p>
+                    <p>目录路径：<code>{{ inputDirPath }}</code></p>
+                  </template>
+                </el-alert>
+
+              <!-- 文件列表 -->
+              <div v-if="availableFiles.length > 0" class="file-list">
+                <el-table 
+                  :data="availableFiles" 
+                  style="width: 100%"
+                  @row-click="selectFile"
+                  :highlight-current-row="true"
+                  :current-row-key="selectedFile?.name"
+                  row-key="name"
+                >
+                  <el-table-column type="selection" width="40" />
+                  <el-table-column prop="name" label="文件名" min-width="200">
+                    <template #default="scope">
+                      <div class="file-name">
+                        <el-icon><VideoPlay v-if="isVideoFile(scope.row.name)" /><Headphone v-else /></el-icon>
+                        {{ scope.row.name }}
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="size" label="大小" width="100">
+                    <template #default="scope">
+                      {{ formatFileSize(scope.row.size) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="modified" label="修改时间" width="160" />
+                  <el-table-column label="操作" width="120">
+                    <template #default="scope">
+                      <el-button
+                        type="primary"
+                        size="small"
+                        @click.stop="selectFile(scope.row)"
+                        :disabled="creating"
+                      >
+                        选择
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
               </div>
 
-              <!-- 上传错误 -->
-              <el-alert
-                v-if="uploadError"
-                :title="uploadError"
-                type="error"
-                show-icon
-                :closable="false"
-              />
+              <!-- 无文件提示 -->
+              <el-empty v-else-if="!loadingFiles" description="input 目录中没有找到支持的媒体文件">
+                <el-button type="primary" @click="loadFiles">刷新文件列表</el-button>
+              </el-empty>
+
+              <!-- 加载中 -->
+              <div v-if="loadingFiles" class="loading-files">
+                <el-icon class="is-loading"><Loading /></el-icon>
+                <span>正在加载文件列表...</span>
+              </div>
+              </div>
+
+              <!-- 选中的文件 -->
+              <div v-if="selectedFile && !showUpload" class="selected-file">
+                <el-tag type="success" size="large" closable @close="clearSelection">
+                  <el-icon><Document /></el-icon>
+                  已选择：{{ selectedFile.name }} 
+                  <span v-if="selectedFile.size">({{ formatFileSize(selectedFile.size) }})</span>
+                  <span v-if="selectedFile.originalName && selectedFile.originalName !== selectedFile.name">
+                    <br><small>原文件名: {{ selectedFile.originalName }}</small>
+                  </span>
+                </el-tag>
+                
+                <el-button 
+                  v-if="!jobId"
+                  type="primary" 
+                  size="large"
+                  :loading="creating"
+                  @click="createJob"
+                  style="margin-top: 12px;"
+                >
+                  <el-icon v-if="!creating"><FolderAdd /></el-icon>
+                  {{ creating ? "创建中..." : "创建转录任务" }}
+                </el-button>
+              </div>
             </div>
           </el-card>
 
@@ -198,6 +274,15 @@
                   <el-icon><RefreshRight /></el-icon>
                   重新转录
                 </el-button>
+                
+                <el-button 
+                  type="success"
+                  size="large"
+                  @click="resetSelection"
+                >
+                  <el-icon><FolderOpened /></el-icon>
+                  重新选择文件
+                </el-button>
               </div>
             </el-form>
           </el-card>
@@ -251,6 +336,16 @@
                   <el-icon><Download /></el-icon>
                   下载 SRT 字幕文件
                 </el-button>
+                
+                <el-button 
+                  type="warning" 
+                  size="large"
+                  @click="copyResultToSource"
+                  style="margin-left: 12px;"
+                >
+                  <el-icon><FolderAdd /></el-icon>
+                  复制到源文件目录
+                </el-button>
               </div>
             </div>
           </el-card>
@@ -266,19 +361,23 @@ import { ref, reactive, onMounted, computed, onUnmounted } from "vue";
 import axios from "axios";
 import { ElMessage, ElMessageBox } from 'element-plus';
 
-const file = ref(null);
-const fileName = ref("");
-const fileSize = ref(0);
+// 文件选择相关
+const availableFiles = ref([]);
+const selectedFile = ref(null);
+const loadingFiles = ref(false);
+const creating = ref(false);
+const inputDirPath = ref('input/');
+const uploading = ref(false);
+const uploadProgress = ref(0);
+const showUpload = ref(false);
+
+// 任务相关 
 const jobId = ref("");
 const status = ref("");
 const progress = ref(0);
-const statusText = ref("等待上传");
+const statusText = ref("请先选择文件");
 const downloadUrl = ref("");
 const processing = ref(false);
-const uploading = ref(false);
-const uploadProgress = ref(0);
-const uploadSpeed = ref(0);
-const uploadError = ref("");
 const starting = ref(false);
 const canceling = ref(false);
 const lastError = ref("");
@@ -324,25 +423,152 @@ function getStatusType() {
   }
 }
 
-// 重置上传状态
-function resetUpload() {
-  ElMessageBox.confirm('确定要重新上传文件吗？这将清除当前的转录进度。', '确认操作', {
+// 检查是否为视频文件
+function isVideoFile(filename) {
+  const videoExtensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v'];
+  const ext = filename.toLowerCase().substring(filename.lastIndexOf('.'));
+  return videoExtensions.includes(ext);
+}
+
+// 文件上传处理
+async function handleUpload(uploadFile) {
+  if (!uploadFile) {
+    ElMessage.warning('请选择文件');
+    return;
+  }
+  
+  // 检查文件类型
+  const videoExtensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v'];
+  const audioExtensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma'];
+  const ext = uploadFile.name.toLowerCase().substring(uploadFile.name.lastIndexOf('.'));
+  
+  if (![...videoExtensions, ...audioExtensions].includes(ext)) {
+    ElMessage.error('不支持的文件格式，请上传视频或音频文件');
+    return;
+  }
+  
+  uploading.value = true;
+  uploadProgress.value = 0;
+  
+  try {
+    const formData = new FormData();
+    formData.append('file', uploadFile.raw);
+    
+    const { data } = await axios.post('/api/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      },
+      onUploadProgress: (progressEvent) => {
+        uploadProgress.value = Math.round(
+          (progressEvent.loaded / progressEvent.total) * 100
+        );
+      }
+    });
+    
+    jobId.value = data.job_id;
+    selectedFile.value = {
+      name: data.filename,
+      originalName: data.original_name,
+      size: uploadFile.size
+    };
+    status.value = "ready";
+    statusText.value = "文件已上传，可开始转录";
+    canRestart.value = false;
+    showUpload.value = false;
+    
+    ElMessage.success('文件上传成功！转录任务已创建。');
+    
+    // 刷新文件列表
+    loadFiles();
+  } catch (error) {
+    console.error('文件上传失败:', error);
+    ElMessage.error('文件上传失败：' + (error.response?.data?.detail || error.message));
+  } finally {
+    uploading.value = false;
+    uploadProgress.value = 0;
+  }
+}
+
+// 切换上传模式
+function toggleUploadMode() {
+  showUpload.value = !showUpload.value;
+  if (showUpload.value) {
+    // 清除已选择的文件
+    selectedFile.value = null;
+  }
+}
+
+// 加载可用文件列表
+async function loadFiles() {
+  loadingFiles.value = true;
+  try {
+    const { data } = await axios.get('/api/files');
+    availableFiles.value = data.files || [];
+    if (availableFiles.value.length === 0) {
+      ElMessage.info('input 目录中没有找到支持的媒体文件');
+    }
+  } catch (error) {
+    console.error('获取文件列表失败:', error);
+    ElMessage.error('获取文件列表失败：' + (error.response?.data?.detail || error.message));
+  } finally {
+    loadingFiles.value = false;
+  }
+}
+
+// 选择文件
+function selectFile(file) {
+  selectedFile.value = file;
+  ElMessage.success(`已选择文件：${file.name}`);
+}
+
+// 清除选择
+function clearSelection() {
+  selectedFile.value = null;
+}
+
+// 创建转录任务
+async function createJob() {
+  if (!selectedFile.value) {
+    ElMessage.warning('请先选择文件');
+    return;
+  }
+  
+  creating.value = true;
+  try {
+    const fd = new FormData();
+    fd.append('filename', selectedFile.value.name);
+    
+    const { data } = await axios.post('/api/create-job', fd);
+    jobId.value = data.job_id;
+    status.value = "ready";
+    statusText.value = "文件已准备就绪，可开始转录";
+    canRestart.value = false;
+    
+    ElMessage.success('转录任务创建成功！');
+  } catch (error) {
+    console.error('创建任务失败:', error);
+    ElMessage.error('创建任务失败：' + (error.response?.data?.detail || error.message));
+  } finally {
+    creating.value = false;
+  }
+}
+
+// 重置选择
+function resetSelection() {
+  ElMessageBox.confirm('确定要重新选择文件吗？这将清除当前的转录进度。', '确认操作', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning',
   }).then(() => {
     // 重置所有状态
-    file.value = null;
-    fileName.value = "";
-    fileSize.value = 0;
+    selectedFile.value = null;
     jobId.value = "";
     status.value = "";
     progress.value = 0;
-    statusText.value = "等待上传";
+    statusText.value = "请先选择文件";
     downloadUrl.value = "";
     processing.value = false;
     canRestart.value = false;
-    uploadError.value = "";
     lastError.value = "";
     phase.value = "";
     language.value = "";
@@ -353,18 +579,12 @@ function resetUpload() {
       pollTimer.value = null;
     }
     
-    ElMessage.success('已重置，可以重新上传文件');
+    // 刷新文件列表
+    loadFiles();
+    ElMessage.success('已重置，可以重新选择文件');
   }).catch(() => {
     // 用户取消操作
   });
-}
-
-function onFileChange(uploadFile) {
-  file.value = uploadFile.raw;
-  fileName.value = uploadFile.name;
-  fileSize.value = uploadFile.size;
-  uploadProgress.value = 0;
-  uploadError.value = "";
 }
 
 // 格式化文件大小
@@ -376,91 +596,9 @@ function formatFileSize(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
-// 格式化上传速度
-function formatSpeed(bytesPerSecond) {
-  if (bytesPerSecond === 0) return "0 B/s";
-  const k = 1024;
-  const sizes = ["B/s", "KB/s", "MB/s", "GB/s"];
-  const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k));
-  return (
-    parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
-  );
-}
-
-async function doUpload() {
-  if (!file.value) {
-    ElMessage.warning('请先选择文件');
-    return;
-  }
-  
-  uploading.value = true;
-  uploadError.value = "";
-  uploadProgress.value = 0;
-  uploadSpeed.value = 0;
-
-  try {
-    const fd = new FormData();
-    fd.append("file", file.value);
-
-    const startTime = Date.now();
-    let lastLoaded = 0;
-    let lastTime = startTime;
-
-    const { data } = await axios.post("/api/upload", fd, {
-      timeout: 0, // 不设置超时
-      onUploadProgress: (progressEvent) => {
-        const now = Date.now();
-        const loaded = progressEvent.loaded;
-        const total = progressEvent.total;
-
-        if (total) {
-          uploadProgress.value = Math.round((loaded / total) * 100);
-        }
-
-        // 计算上传速度
-        if (now - lastTime > 1000) {
-          // 每秒更新一次速度
-          const timeDiff = (now - lastTime) / 1000;
-          const bytesDiff = loaded - lastLoaded;
-          uploadSpeed.value = bytesDiff / timeDiff;
-          lastLoaded = loaded;
-          lastTime = now;
-        }
-      },
-    });
-
-    jobId.value = data.job_id;
-    status.value = "uploaded";
-    statusText.value = "文件已上传, 可开始转录";
-    canRestart.value = false;
-    uploadProgress.value = 100;
-    
-    ElMessage.success('文件上传成功！');
-    console.log("上传成功:", data);
-  } catch (e) {
-    console.error("上传失败:", e);
-    let errorMessage = "上传失败";
-    
-    if (e.code === "ECONNABORTED") {
-      errorMessage = "上传超时，请检查网络连接或尝试上传较小的文件";
-    } else if (e.response) {
-      errorMessage = `上传失败: ${e.response.status} ${e.response.statusText}`;
-    } else if (e.request) {
-      errorMessage = "网络连接失败，请检查后端服务是否正常运行";
-    } else {
-      errorMessage = "上传失败: " + (e.message || e);
-    }
-    
-    uploadError.value = errorMessage;
-    ElMessage.error(errorMessage);
-  } finally {
-    uploading.value = false;
-  }
-}
-
 async function startJob() {
   if (!jobId.value) {
-    ElMessage.warning('请先上传文件');
+    ElMessage.warning('请先选择文件并创建任务');
     return;
   }
   
@@ -590,6 +728,22 @@ function downloadFile() {
   }
 }
 
+// 复制结果到源目录
+async function copyResultToSource() {
+  if (!jobId.value) {
+    ElMessage.warning('没有可复制的结果');
+    return;
+  }
+  
+  try {
+    const { data } = await axios.post(`/api/copy-result/${jobId.value}`);
+    ElMessage.success('字幕文件已复制到源文件目录！');
+  } catch (error) {
+    console.error('复制结果失败:', error);
+    ElMessage.error('复制结果失败：' + (error.response?.data?.detail || error.message));
+  }
+}
+
 // 组件卸载时清理定时器
 onUnmounted(() => {
   if (pollTimer.value) {
@@ -597,7 +751,10 @@ onUnmounted(() => {
   }
 });
 
-onMounted(() => {});
+onMounted(() => {
+  // 页面加载时自动获取文件列表
+  loadFiles();
+});
 </script>
 
 <style scoped>
@@ -658,6 +815,48 @@ onMounted(() => {});
   font-size: 1.1rem;
   font-weight: 600;
   color: #2c3e50;
+}
+
+.file-selection-area {
+  text-align: left;
+}
+
+.file-list {
+  margin: 20px 0;
+}
+
+.file-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selected-file {
+  text-align: center;
+  margin: 20px 10px;
+}
+
+.loading-files {
+  text-align: center;
+  padding: 40px 0;
+  color: #606266;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.upload-mode {
+  margin-bottom: 20px;
+}
+
+.upload-content {
+  text-align: center;
+  padding: 60px 20px;
+}
+
+.browse-mode {
+  /* 保持现有布局 */
 }
 
 .upload-area {

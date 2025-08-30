@@ -47,7 +47,7 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5174') do (
 
 :: 启动后端服务
 echo [信息] 启动后端服务...
-start "Video-to-SRT 后端" /MIN cmd /c "cd /d %~dp0backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
+start "Video-to-SRT 后端" /MIN cmd /c "cd /d %~dp0backend && python app/main.py"
 
 :: 等待后端启动
 echo [信息] 等待后端服务启动...
