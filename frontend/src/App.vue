@@ -32,7 +32,7 @@
                     :disabled="creating || uploading"
                   >
                     <el-icon><Upload /></el-icon>
-                    {{ showUpload ? '浏览文件' : '上传文件' }}
+                    {{ showUpload ? '切换到本地模式' : '切换到上传模式' }}
                   </el-button>
                   <el-button 
                     type="primary" 
@@ -369,7 +369,7 @@ const creating = ref(false);
 const inputDirPath = ref('input/');
 const uploading = ref(false);
 const uploadProgress = ref(0);
-const showUpload = ref(false);
+const showUpload = ref(false); // 默认使用本地input模式
 
 // 任务相关 
 const jobId = ref("");
