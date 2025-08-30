@@ -2,6 +2,8 @@ import os
 import sys
 import uuid
 import shutil
+import logging
+import asyncio
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +15,9 @@ from datetime import datetime
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from processor import JobSettings, CPUAffinityConfig, get_processor
+from processor import JobSettings, CPUAffinityConfig, get_processor, initialize_model_manager, preload_default_models, get_preload_status, get_cache_status
+from services.model_preload_manager import PreloadConfig
+from config.model_config import ModelPreloadConfig
 
 app = FastAPI(title="Video To SRT API", version="0.3.0")
 
@@ -24,6 +28,61 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动事件 - 初始化模型管理器和预加载"""
+    try:
+        logger.info("服务启动中，初始化模型管理器...")
+        
+        # 初始化模型管理器
+        model_manager = initialize_model_manager(preload_config)
+        logger.info("模型管理器初始化成功")
+        
+        # 异步启动预加载任务
+        asyncio.create_task(preload_models_on_startup())
+        
+    except Exception as e:
+        logger.error(f"启动初始化失败: {str(e)}", exc_info=True)
+
+async def preload_models_on_startup():
+    """启动时异步预加载模型"""
+    global preload_completed
+    
+    try:
+        logger.info("开始后台预加载模型...")
+        
+        def progress_callback(status):
+            logger.info(f"预加载进度: {status['progress']:.1f}%, 当前模型: {status['current_model']}")
+        
+        result = await preload_default_models(progress_callback)
+        
+        if result['success']:
+            logger.info(f"模型预加载成功! 已加载 {result['loaded_models']}/{result['total_models']} 个模型")
+        else:
+            logger.warning(f"模型预加载失败: {result.get('message', 'Unknown error')}")
+        
+        if result.get('errors'):
+            for error in result['errors']:
+                logger.warning(f"预加载错误: {error}")
+        
+        preload_completed = True
+        
+    except Exception as e:
+        logger.error(f"模型预加载异常: {str(e)}", exc_info=True)
+        preload_completed = True
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭事件 - 清理资源"""
+    try:
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        if model_manager:
+            model_manager.clear_cache()
+            logger.info("已清理模型缓存")
+    except Exception as e:
+        logger.error(f"清理资源失败: {str(e)}")
 
 # 目录配置
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,6 +100,20 @@ for dir_path in [INPUT_DIR, OUTPUT_DIR, JOBS_DIR, TEMP_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
 proc = get_processor(JOBS_DIR)
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 初始化模型预加载管理器
+preload_config = ModelPreloadConfig.get_preload_config()
+
+# 打印配置信息
+ModelPreloadConfig.print_config()
+
+# 全局预加载状态
+preload_completed = False
 
 class TranscribeSettings(BaseModel):
     model: str = "medium"
@@ -390,6 +463,103 @@ async def get_hardware_status():
         return {
             "success": False,
             "message": f"获取硬件状态失败: {str(e)}"
+        }
+
+# 模型管理API端点
+@app.get("/api/models/preload/status")
+async def get_models_preload_status():
+    """获取模型预加载状态"""
+    try:
+        status = get_preload_status()
+        return {
+            "success": True,
+            "data": status,
+            "message": "获取预加载状态成功"
+        }
+    except Exception as e:
+        logger.error(f"获取预加载状态失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"获取预加载状态失败: {str(e)}"
+        }
+
+@app.get("/api/models/cache/status")
+async def get_models_cache_status():
+    """获取模型缓存状态"""
+    try:
+        status = get_cache_status()
+        return {
+            "success": True,
+            "data": status,
+            "message": "获取缓存状态成功"
+        }
+    except Exception as e:
+        logger.error(f"获取缓存状态失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"获取缓存状态失败: {str(e)}"
+        }
+
+@app.post("/api/models/preload/start")
+async def start_models_preload():
+    """手动启动模型预加载"""
+    global preload_completed
+    
+    try:
+        if not preload_completed:
+            return {
+                "success": False,
+                "message": "预加载正在进行中，请稍候"
+            }
+        
+        # 重置状态
+        preload_completed = False
+        
+        def progress_callback(status):
+            logger.info(f"手动预加载进度: {status['progress']:.1f}%, 当前模型: {status['current_model']}")
+        
+        result = await preload_default_models(progress_callback)
+        preload_completed = True
+        
+        return {
+            "success": result['success'],
+            "data": result,
+            "message": "预加载完成" if result['success'] else f"预加载失败: {result.get('message', 'Unknown error')}"
+        }
+        
+    except Exception as e:
+        preload_completed = True
+        logger.error(f"手动启动预加载失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"启动预加载失败: {str(e)}"
+        }
+
+@app.post("/api/models/cache/clear")
+async def clear_models_cache():
+    """清空模型缓存"""
+    try:
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        
+        if model_manager:
+            model_manager.clear_cache()
+            logger.info("手动清空模型缓存成功")
+            return {
+                "success": True,
+                "message": "模型缓存已清空"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "模型管理器未初始化"
+            }
+            
+    except Exception as e:
+        logger.error(f"清空模型缓存失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"清空缓存失败: {str(e)}"
         }
 
 if __name__ == "__main__":

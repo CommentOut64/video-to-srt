@@ -8,6 +8,9 @@
         <el-icon><Setting /></el-icon>
         <span>2. 设置参数并开始转录</span>
         <div style="margin-left:auto; display:flex; gap:8px;">
+          <!-- 模型状态按钮 -->
+          <ModelStatusButton />
+          
           <el-button 
             type="info" 
             size="small"
@@ -124,6 +127,7 @@
 
 <script setup>
 import { defineProps, defineEmits } from 'vue'
+import ModelStatusButton from '../models/ModelStatusButton.vue'
 
 // 定义props
 const props = defineProps({

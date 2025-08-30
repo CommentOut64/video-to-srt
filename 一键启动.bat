@@ -44,10 +44,13 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8000') do (
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5174') do (
     taskkill /F /PID %%a >nul 2>&1
 )
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5175') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
 
 :: 启动后端服务
 echo [信息] 启动后端服务...
-start "Video-to-SRT 后端" /MIN cmd /c "cd /d %~dp0backend && python app/main_refactored.py"
+start "Video-to-SRT 后端" /MIN cmd /c "cd /d %~dp0backend && python app/main.py"
 
 :: 等待后端启动
 echo [信息] 等待后端服务启动...
@@ -66,6 +69,17 @@ goto wait_backend
 
 :backend_ready
 echo [成功] 后端服务已启动
+
+:: 询问是否预加载模型
+echo [选项] 是否预加载Whisper模型以提升转录速度？
+echo          预加载会占用更多内存，但可显著减少首次转录等待时间
+choice /c YN /m "预加载模型 (Y/N)"
+if errorlevel 2 goto skip_preload
+
+echo [信息] 正在预加载模型，请稍候...
+powershell -Command "try { Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/models/preload/start' -Method Post -TimeoutSec 5 | Out-Null; echo '[成功] 模型预加载已启动' } catch { echo '[警告] 模型预加载启动失败，将在使用时自动加载' }"
+
+:skip_preload
 
 :: 检查前端依赖
 if not exist "%~dp0frontend\node_modules" (
@@ -87,8 +101,19 @@ start "Video-to-SRT 前端" /MIN cmd /c "cd /d %~dp0frontend && npm run dev"
 echo [信息] 等待前端服务启动...
 set /a retries=0
 :wait_frontend
+:: 检查5174端口
 powershell -Command "try { (Invoke-WebRequest -UseBasicParsing 'http://localhost:5174' -TimeoutSec 2).StatusCode -eq 200 } catch { $false }" | findstr True >nul
-if not errorlevel 1 goto frontend_ready
+if not errorlevel 1 (
+    set frontend_port=5174
+    goto frontend_ready
+)
+
+:: 检查5175端口
+powershell -Command "try { (Invoke-WebRequest -UseBasicParsing 'http://localhost:5175' -TimeoutSec 2).StatusCode -eq 200 } catch { $false }" | findstr True >nul
+if not errorlevel 1 (
+    set frontend_port=5175
+    goto frontend_ready
+)
 
 set /a retries+=1
 if !retries! geq 30 (
@@ -99,16 +124,16 @@ timeout /t 1 >nul
 goto wait_frontend
 
 :frontend_ready
-echo [成功] 前端服务已启动
+echo [成功] 前端服务已启动在端口 !frontend_port!
 
 :: 打开浏览器
 echo [信息] 打开浏览器...
-start http://localhost:5174
+start http://localhost:!frontend_port!
 
 echo.
 echo ==========================================================
 echo ✅ 服务启动完成！
-echo 前端地址: http://localhost:5174
+echo 前端地址: http://localhost:!frontend_port!
 echo 后端地址: http://127.0.0.1:8000  
 echo ==========================================================
 echo.
@@ -127,6 +152,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8000') do (
     taskkill /F /PID %%a >nul 2>&1
 )
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5174') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5175') do (
     taskkill /F /PID %%a >nul 2>&1
 )
 echo [成功] 所有服务已停止

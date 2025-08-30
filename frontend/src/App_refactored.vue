@@ -83,6 +83,7 @@ import FileSelector from './components/file-management/FileSelector.vue'
 import TranscriptionSettings from './components/transcription/TranscriptionSettings.vue'
 import ProgressDisplay from './components/transcription/ProgressDisplay.vue'
 import HardwareDialog from './components/hardware/HardwareDialog.vue'
+import ModelStatusButton from './components/models/ModelStatusButton.vue'
 
 // 导入服务
 import { FileService } from './services/fileService.js'

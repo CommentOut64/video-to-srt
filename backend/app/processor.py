@@ -11,11 +11,19 @@ try:
 except ImportError:
     psutil = None
 
-# 全局模型缓存 (按 (model, compute_type, device) 键)
+# 导入模型预加载管理器
+from services.model_preload_manager import ModelPreloadManager, PreloadConfig
+# 导入作业模型
+from models.job_models import JobSettings as BaseJobSettings
+
+# 全局模型缓存 (保持向后兼容)
 _model_cache: Dict[Tuple[str, str, str], object] = {}
 _align_model_cache: Dict[str, Tuple[object, object]] = {}
 _model_lock = threading.Lock()
 _align_lock = threading.Lock()
+
+# 全局模型预加载管理器
+_model_manager: Optional[ModelPreloadManager] = None
 
 SEGMENT_LEN_MS = 60_000
 SILENCE_SEARCH_MS = 2_000
@@ -159,12 +167,8 @@ class CPUAffinityManager:
             return False
 
 @dataclass
-class JobSettings:
-    model: str = "medium"
-    compute_type: str = "float16"
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    batch_size: int = 16
-    word_timestamps: bool = False
+class JobSettings(BaseJobSettings):
+    """扩展的作业设置，包含CPU亲和性配置"""
     cpu_affinity: CPUAffinityConfig = field(default_factory=CPUAffinityConfig)
 
 @dataclass
@@ -189,6 +193,39 @@ class JobState:
         d = asdict(self)
         d.pop('segments', None)  # 不透出内部详情
         return d
+
+def initialize_model_manager(config: PreloadConfig = None) -> ModelPreloadManager:
+    """初始化全局模型管理器"""
+    global _model_manager
+    if _model_manager is None:
+        _model_manager = ModelPreloadManager(config)
+        logging.getLogger(__name__).info("模型预加载管理器已初始化")
+    return _model_manager
+
+def get_model_manager() -> Optional[ModelPreloadManager]:
+    """获取全局模型管理器"""
+    return _model_manager
+
+async def preload_default_models(progress_callback=None) -> Dict[str, any]:
+    """预加载默认模型"""
+    if _model_manager is None:
+        return {"success": False, "message": "模型管理器未初始化"}
+    
+    return await _model_manager.preload_models(progress_callback)
+
+def get_preload_status() -> Dict[str, any]:
+    """获取预加载状态"""
+    if _model_manager is None:
+        return {"is_preloading": False, "message": "模型管理器未初始化"}
+    
+    return _model_manager.get_preload_status()
+
+def get_cache_status() -> Dict[str, any]:
+    """获取缓存状态"""
+    if _model_manager is None:
+        return {"message": "模型管理器未初始化"}
+    
+    return _model_manager.get_cache_status()
 
 class TranscriptionProcessor:
     def __init__(self, jobs_root: str):
@@ -377,6 +414,17 @@ class TranscriptionProcessor:
         return segments
 
     def _get_model(self, settings: JobSettings):
+        """获取Whisper模型，优先使用模型管理器，否则使用原有缓存机制"""
+        global _model_manager
+        
+        # 如果模型管理器可用，使用它
+        if _model_manager is not None:
+            try:
+                return _model_manager.get_model(settings)
+            except Exception as e:
+                self.logger.warning(f"模型管理器获取模型失败，回退到原有机制: {e}")
+        
+        # 回退到原有缓存机制 (保持向后兼容)
         key = (settings.model, settings.compute_type, settings.device)
         with _model_lock:
             if key in _model_cache:
@@ -386,6 +434,17 @@ class TranscriptionProcessor:
             return m
 
     def _get_align_model(self, lang: str, device: str):
+        """获取对齐模型，优先使用模型管理器，否则使用原有缓存机制"""
+        global _model_manager
+        
+        # 如果模型管理器可用，使用它
+        if _model_manager is not None:
+            try:
+                return _model_manager.get_align_model(lang, device)
+            except Exception as e:
+                self.logger.warning(f"模型管理器获取对齐模型失败，回退到原有机制: {e}")
+        
+        # 回退到原有缓存机制 (保持向后兼容)
         with _align_lock:
             if lang in _align_model_cache:
                 return _align_model_cache[lang]

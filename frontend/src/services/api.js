@@ -33,4 +33,31 @@ apiClient.interceptors.response.use(
   }
 )
 
+// 模型管理API
+export const modelAPI = {
+  // 获取预加载状态
+  async getPreloadStatus() {
+    const response = await apiClient.get('/models/preload/status')
+    return response.data
+  },
+
+  // 获取缓存状态
+  async getCacheStatus() {
+    const response = await apiClient.get('/models/cache/status')
+    return response.data
+  },
+
+  // 启动预加载
+  async startPreload() {
+    const response = await apiClient.post('/models/preload/start')
+    return response.data
+  },
+
+  // 清空缓存
+  async clearCache() {
+    const response = await apiClient.post('/models/cache/clear')
+    return response.data
+  }
+}
+
 export default apiClient
