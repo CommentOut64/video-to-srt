@@ -2,21 +2,17 @@
   <el-button
     :type="statusType"
     size="small"
-    @click="showDialog = true"
-    :loading="modelStatus.is_preloading"
+    @click="openDialog"
+    :loading="isLoadingStatus"
     class="model-status-btn"
     :class="{
-      'status-loading': modelStatus.is_preloading,
+      'status-loading': isLoadingStatus,
       'status-success':
         modelStatus.loaded_models > 0 && !modelStatus.is_preloading,
       'status-error': modelStatus.errors.length > 0,
-      'status-idle':
-        modelStatus.loaded_models === 0 &&
-        !modelStatus.is_preloading &&
-        modelStatus.errors.length === 0,
     }"
   >
-    <el-icon v-if="!modelStatus.is_preloading">
+    <el-icon v-if="!isLoadingStatus">
       <component :is="statusIcon" />
     </el-icon>
     {{ statusText }}
@@ -29,6 +25,12 @@
     width="600px"
     :close-on-click-modal="false"
     destroy-on-close
+    :modal="true"
+    :append-to-body="true"
+    :lock-scroll="false"
+    center
+    :modal-class="'model-status-modal'"
+    @close="closeDialog"
   >
     <div class="model-status-content">
       <!-- 预加载状态 -->
@@ -39,14 +41,10 @@
           <div
             class="status-indicator"
             :class="{
-              'indicator-loading': modelStatus.is_preloading,
+              'indicator-loading': isLoadingStatus,
               'indicator-success':
                 modelStatus.loaded_models > 0 && !modelStatus.is_preloading,
               'indicator-error': modelStatus.errors.length > 0,
-              'indicator-idle':
-                modelStatus.loaded_models === 0 &&
-                !modelStatus.is_preloading &&
-                modelStatus.errors.length === 0,
             }"
           >
             <div class="indicator-dot"></div>
@@ -65,10 +63,10 @@
             <el-button type="warning" size="small" @click="clearModelCache">
               清空缓存
             </el-button>
-            <el-button 
+            <el-button
               v-if="isPreloadBlocked"
-              type="danger" 
-              size="small" 
+              type="danger"
+              size="small"
               @click="resetPreloadAttempts"
             >
               重置重试
@@ -123,9 +121,13 @@
             show-icon
           >
             <template #default>
-              <p>预加载失败次数已达到上限 ({{ modelStatus.failed_attempts }}/{{ modelStatus.max_retry_attempts }})。</p>
+              <p>
+                预加载失败次数已达到上限 ({{ modelStatus.failed_attempts }}/{{
+                  modelStatus.max_retry_attempts
+                }})。
+              </p>
               <p>请检查系统状态后点击"重置重试"按钮重新尝试。</p>
-              <p class="retry-tip">💡 提示：模型仍可在首次使用时自动加载</p>
+              <p class="retry-tip">提示：模型仍可在首次使用时自动加载</p>
             </template>
           </el-alert>
         </div>
@@ -219,7 +221,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
+import {
+  ref,
+  reactive,
+  computed,
+  onMounted,
+  onUnmounted,
+  watch,
+  nextTick,
+} from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   Warning,
@@ -263,19 +273,29 @@ const isPreloadBlocked = computed(() => {
   return modelStatus.failed_attempts >= modelStatus.max_retry_attempts;
 });
 
+// 统一的加载中状态判断
+const isLoadingStatus = computed(() => {
+  return (
+    modelStatus.is_preloading ||
+    (modelStatus.loaded_models === 0 &&
+      !modelStatus.is_preloading &&
+      modelStatus.errors.length === 0)
+  );
+});
+
 const statusType = computed(() => {
   if (modelStatus.errors.length > 0) return "danger";
-  if (modelStatus.is_preloading) return "warning";
+  if (isLoadingStatus.value) return "warning";
   if (modelStatus.loaded_models > 0) return "success";
-  return "primary";
+  return "warning";
 });
 
 const statusText = computed(() => {
   if (isPreloadBlocked.value) {
     return `重试已达上限 (${modelStatus.failed_attempts}/${modelStatus.max_retry_attempts})`;
   }
-  if (modelStatus.is_preloading) {
-    if (modelStatus.progress > 0) {
+  if (isLoadingStatus.value) {
+    if (modelStatus.is_preloading && modelStatus.progress > 0) {
       return `加载中... ${Math.round(modelStatus.progress)}%`;
     }
     return "加载中...";
@@ -286,7 +306,7 @@ const statusText = computed(() => {
   if (modelStatus.loaded_models > 0) {
     return `已加载模型 (${modelStatus.loaded_models})`;
   }
-  return "未加载模型";
+  return "加载中...";
 });
 
 function getPreloadButtonText() {
@@ -301,16 +321,92 @@ function getPreloadButtonText() {
 
 const statusIcon = computed(() => {
   if (modelStatus.errors.length > 0) return "Warning";
-  if (modelStatus.is_preloading) return "Loading";
+  if (isLoadingStatus.value) return "Loading";
   if (modelStatus.loaded_models > 0) return "CircleCheckFilled";
-  return "Download";
+  return "Loading";
+});
+
+// 对话框处理函数，防止布局偏移
+function openDialog() {
+  // 记录当前滚动条宽度
+  const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+  
+  // 记录当前body的样式，以便恢复
+  const currentBodyStyle = {
+    paddingRight: document.body.style.paddingRight,
+    overflow: document.body.style.overflow,
+    width: document.body.style.width
+  };
+  
+  // 设置body的样式来补偿可能消失的滚动条，但实际不需要因为我们设置了overflow-y: scroll
+  document.body.style.paddingRight = '0px';
+  document.body.style.overflow = 'hidden auto'; // 只隐藏水平滚动，保持垂直滚动
+  document.body.style.width = '100vw';
+  
+  // 强制移除Element Plus可能添加的类
+  document.body.classList.remove('el-popup-parent--hidden');
+  
+  showDialog.value = true;
+  
+  // 监听Element Plus添加类的行为并立即移除
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+        if (document.body.classList.contains('el-popup-parent--hidden')) {
+          document.body.classList.remove('el-popup-parent--hidden');
+        }
+      }
+      if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+        // 防止Element Plus修改padding-right
+        if (document.body.style.paddingRight && document.body.style.paddingRight !== '0px') {
+          document.body.style.paddingRight = '0px';
+        }
+      }
+    });
+  });
+  
+  observer.observe(document.body, { 
+    attributes: true, 
+    attributeFilter: ['class', 'style'] 
+  });
+  
+  // 存储observer以便后续清理
+  document.body._modalObserver = observer;
+}
+
+function closeDialog() {
+  // 清理observer
+  if (document.body._modalObserver) {
+    document.body._modalObserver.disconnect();
+    delete document.body._modalObserver;
+  }
+  
+  // 恢复body样式
+  document.body.style.paddingRight = '';
+  document.body.style.overflow = '';
+  document.body.style.width = '';
+  
+  // 确保移除Element Plus的类
+  document.body.classList.remove('el-popup-parent--hidden');
+  
+  showDialog.value = false;
+}
+
+// 监听对话框关闭
+watch(showDialog, (newVal) => {
+  if (!newVal) {
+    // 延迟恢复，确保对话框完全关闭
+    nextTick(() => {
+      closeDialog();
+    });
+  }
 });
 
 // 方法
 async function updateModelStatus() {
   try {
     console.log("🔄 开始更新模型状态...");
-    
+
     const [preloadRes, cacheRes] = await Promise.all([
       modelAPI.getPreloadStatus(),
       modelAPI.getCacheStatus(),
@@ -322,16 +418,16 @@ async function updateModelStatus() {
         is_preloading: newStatus.is_preloading,
         progress: newStatus.progress,
         loaded_models: newStatus.loaded_models,
-        current_model: newStatus.current_model
+        current_model: newStatus.current_model,
       });
-      
+
       // 检测状态变化
       const wasPreloading = modelStatus.is_preloading;
       const isNowPreloading = newStatus.is_preloading;
-      
+
       // 直接更新本地状态
       Object.assign(modelStatus, newStatus);
-      
+
       // 状态变化日志
       if (wasPreloading !== isNowPreloading) {
         if (isNowPreloading) {
@@ -344,7 +440,7 @@ async function updateModelStatus() {
           startRegularUpdates();
         }
       }
-      
+
       console.log("✅ 本地状态已更新");
     } else {
       console.warn("⚠️ 获取预加载状态失败:", preloadRes.message);
@@ -364,13 +460,13 @@ async function updateModelStatus() {
 async function startPreload() {
   try {
     console.log("🚀 用户点击启动预加载");
-    
+
     // 检查当前状态
     if (modelStatus.is_preloading) {
       ElMessage.warning("预加载正在进行中，请稍候");
       return;
     }
-    
+
     if (isPreloadBlocked.value) {
       ElMessage.error("预加载重试次数已达上限，请先重置");
       return;
@@ -379,14 +475,14 @@ async function startPreload() {
     console.log("📡 发送预加载启动请求...");
     const result = await modelAPI.startPreload();
     console.log("📊 API响应:", result);
-    
+
     if (result.success) {
       ElMessage.success("模型预加载已启动");
-      
+
       // 立即更新状态以获取最新的预加载状态
       console.log("🔄 立即更新状态检查预加载启动情况");
       await updateModelStatus();
-      
+
       // 如果检测到正在预加载，启动高频更新
       if (modelStatus.is_preloading) {
         console.log("✅ 检测到预加载已启动，开始高频监控");
@@ -400,14 +496,15 @@ async function startPreload() {
           }
         }, 2000);
       }
-      
     } else {
       console.warn("⚠️ 预加载启动失败:", result.message);
       ElMessage.error(result.message || "启动预加载失败");
     }
   } catch (error) {
     console.error("❌ 启动预加载异常:", error);
-    ElMessage.error("启动预加载失败: " + (error.response?.data?.message || error.message));
+    ElMessage.error(
+      "启动预加载失败: " + (error.response?.data?.message || error.message)
+    );
   }
 }
 
@@ -467,18 +564,18 @@ async function resetPreloadAttempts() {
 
     console.log("开始重置预加载重试计数");
 
-    const response = await fetch('/api/models/preload/reset', {
-      method: 'POST',
+    const response = await fetch("/api/models/preload/reset", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
+        "Content-Type": "application/json",
       },
     });
 
     const result = await response.json();
-    
+
     if (result.success) {
       ElMessage.success("预加载重试计数已重置");
-      
+
       // 立即更新本地状态
       modelStatus.failed_attempts = 0;
       modelStatus.errors = [];
@@ -502,29 +599,31 @@ async function resetPreloadAttempts() {
 
 // 高频率状态更新 - 用于预加载期间
 function startHighFrequencyUpdates() {
-  console.log("� 启动高频率状态更新");
+  console.log("启动高频率状态更新");
   stopHighFrequencyUpdates(); // 先停止之前的更新
-  
+
   let updateCount = 0;
   const maxUpdates = 90; // 最多更新90次（1.5分钟）
-  
+
   highFrequencyTimer.value = setInterval(async () => {
     updateCount++;
-    console.log(`⚡ 高频更新 #${updateCount}`);
-    
+    console.log(`高频更新 #${updateCount}`);
+
     await updateModelStatus();
-    
+
     // 检查是否完成
     if (!modelStatus.is_preloading && modelStatus.loaded_models > 0) {
-      console.log("🎉 预加载完成，停止高频更新");
+      console.log("预加载完成，停止高频更新");
       stopHighFrequencyUpdates();
-      ElMessage.success(`模型预加载完成！已加载 ${modelStatus.loaded_models} 个模型`);
+      ElMessage.success(
+        `模型预加载完成！已加载 ${modelStatus.loaded_models} 个模型`
+      );
       return;
     }
-    
+
     // 达到最大次数停止
     if (updateCount >= maxUpdates) {
-      console.log("⏰ 高频更新达到最大次数，切换到常规更新");
+      console.log("高频更新达到最大次数，切换到常规更新");
       stopHighFrequencyUpdates();
       startRegularUpdates();
     }
@@ -533,16 +632,16 @@ function startHighFrequencyUpdates() {
 
 function stopHighFrequencyUpdates() {
   if (highFrequencyTimer.value) {
-    console.log("⏹️ 停止高频率状态更新");
+    console.log("停止高频率状态更新");
     clearInterval(highFrequencyTimer.value);
     highFrequencyTimer.value = null;
   }
 }
 
 function startRegularUpdates() {
-  console.log("🔄 启动常规状态更新");
+  console.log("启动常规状态更新");
   stopRegularUpdates(); // 先停止之前的更新
-  
+
   const updateInterval = () => {
     if (modelStatus.is_preloading) return 3000; // 预加载时3秒
     if (modelStatus.loaded_models > 0) return 15000; // 已加载时15秒
@@ -582,7 +681,7 @@ function getStatusIndicatorText() {
   if (isPreloadBlocked.value) {
     return `重试已达上限 (${modelStatus.failed_attempts}/${modelStatus.max_retry_attempts})`;
   }
-  if (modelStatus.is_preloading) {
+  if (isLoadingStatus.value) {
     return "加载中";
   }
   if (modelStatus.errors.length > 0) {
@@ -591,7 +690,7 @@ function getStatusIndicatorText() {
   if (modelStatus.loaded_models > 0) {
     return "已就绪";
   }
-  return "待机";
+  return "加载中";
 }
 
 // 手动强制更新状态
@@ -625,10 +724,10 @@ function simulatePreloading() {
 }
 
 function startStatusUpdates() {
-  console.log("🔄 启动初始状态更新");
+  console.log("启动初始状态更新");
   // 立即更新一次状态
   updateModelStatus().then(() => {
-    console.log("✅ 初始状态更新完成，开始常规更新");
+    console.log("初始状态更新完成，开始常规更新");
     startRegularUpdates();
   });
 }
@@ -636,29 +735,38 @@ function startStatusUpdates() {
 // 生命周期
 onMounted(() => {
   console.log("🎬 ModelStatusButton 组件已挂载");
-  
+
   // 添加响应式监听
-  watch(() => modelStatus.is_preloading, (newVal, oldVal) => {
-    if (newVal !== oldVal) {
-      console.log(`🔄 预加载状态变化: ${oldVal} -> ${newVal}`);
-      console.log(`🎨 按钮状态: ${statusType.value}, 文本: ${statusText.value}`);
+  watch(
+    () => modelStatus.is_preloading,
+    (newVal, oldVal) => {
+      if (newVal !== oldVal) {
+        console.log(`预加载状态变化: ${oldVal} -> ${newVal}`);
+        console.log(`按钮状态: ${statusType.value}, 文本: ${statusText.value}`);
+      }
     }
-  });
-  
-  watch(() => modelStatus.progress, (newVal, oldVal) => {
-    if (modelStatus.is_preloading && Math.abs(newVal - oldVal) > 5) {
-      console.log(`📊 预加载进度: ${oldVal}% -> ${newVal}%`);
+  );
+
+  watch(
+    () => modelStatus.progress,
+    (newVal, oldVal) => {
+      if (modelStatus.is_preloading && Math.abs(newVal - oldVal) > 5) {
+        console.log(`预加载进度: ${oldVal}% -> ${newVal}%`);
+      }
     }
-  });
-  
-  watch(() => modelStatus.loaded_models, (newVal, oldVal) => {
-    if (newVal !== oldVal) {
-      console.log(`📦 已加载模型数量变化: ${oldVal} -> ${newVal}`);
+  );
+
+  watch(
+    () => modelStatus.loaded_models,
+    (newVal, oldVal) => {
+      if (newVal !== oldVal) {
+        console.log(`已加载模型数量变化: ${oldVal} -> ${newVal}`);
+      }
     }
-  });
-  
+  );
+
   // 启动状态更新
-  console.log("⚡ 启动初始状态检查");
+  console.log("启动初始状态检查");
   startStatusUpdates();
 });
 
@@ -666,6 +774,18 @@ onUnmounted(() => {
   console.log("🔚 ModelStatusButton 组件卸载，清理定时器");
   stopRegularUpdates();
   stopHighFrequencyUpdates();
+  
+  // 清理observer
+  if (document.body._modalObserver) {
+    document.body._modalObserver.disconnect();
+    delete document.body._modalObserver;
+  }
+  
+  // 确保清理body样式
+  document.body.style.paddingRight = '';
+  document.body.style.overflow = '';
+  document.body.style.width = '';
+  document.body.classList.remove('el-popup-parent--hidden');
 });
 </script>
 
@@ -673,6 +793,8 @@ onUnmounted(() => {
 .model-status-content {
   max-height: 60vh;
   overflow: hidden;
+  /* 防止对话框内容变化引起布局偏移 */
+  contain: layout;
 }
 
 .status-section {
@@ -739,16 +861,6 @@ onUnmounted(() => {
 .status-indicator.indicator-error .indicator-dot {
   background-color: #e74c3c;
   animation: blink 1s infinite;
-}
-
-.status-indicator.indicator-idle {
-  background-color: rgba(52, 152, 219, 0.1);
-  color: #3498db;
-}
-
-.status-indicator.indicator-idle .indicator-dot {
-  background-color: #3498db;
-  animation: none;
 }
 
 @keyframes pulse-dot {
@@ -925,6 +1037,8 @@ onUnmounted(() => {
   font-weight: 500;
   transition: all 0.3s ease;
   border-radius: 6px;
+  /* 防止按钮状态变化引起布局偏移 */
+  will-change: auto;
 }
 
 .model-status-btn.status-loading {
@@ -948,16 +1062,9 @@ onUnmounted(() => {
   box-shadow: 0 2px 8px rgba(231, 76, 60, 0.3);
 }
 
-.model-status-btn.status-idle {
-  background-color: #3498db;
-  border-color: #3498db;
-  color: white;
-}
-
 .model-status-btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  /* 移除可能导致相邻元素偏移的过渡 */
 }
 
 @keyframes pulse {
@@ -970,5 +1077,73 @@ onUnmounted(() => {
   100% {
     box-shadow: 0 0 0 0 rgba(243, 156, 18, 0);
   }
+}
+</style>
+
+<!-- 全局样式防止对话框布局偏移 -->
+<style>
+/* 防止滚动条变化引起的水平移动 */
+html {
+  overflow-y: scroll !important;
+  scrollbar-gutter: stable;
+}
+
+body {
+  /* 确保body始终保持相同的宽度 */
+  overflow-x: hidden;
+  width: 100vw;
+  position: relative;
+  /* 防止Element Plus添加padding-right */
+  box-sizing: border-box;
+}
+
+/* 强制防止Element Plus修改body样式 */
+body.el-popup-parent--hidden {
+  padding-right: 0 !important;
+  overflow: visible !important;
+  width: 100vw !important;
+}
+
+.el-overlay {
+  /* 确保遮罩层不影响主界面布局 */
+  position: fixed !important;
+  z-index: 2000;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  /* 防止创建新的堆叠上下文影响布局 */
+  contain: strict;
+}
+
+.el-dialog {
+  /* 确保对话框使用固定定位 */
+  position: fixed !important;
+  transform: translateX(-50%) translateY(-50%);
+  left: 50vw;
+  top: 50vh;
+  margin: 0 !important;
+  max-width: calc(100vw - 32px);
+  /* 防止对话框影响主界面 */
+  contain: layout style;
+}
+
+.model-status-modal {
+  /* 自定义遮罩层样式 */
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+/* 防止Element Plus自动添加的滚动锁定样式 */
+.el-popup-parent--hidden {
+  padding-right: 0 !important;
+  overflow: auto !important;
+}
+
+/* 确保所有可能的容器都不会因为对话框而移动 */
+#app, .app-container, .main-content {
+  transition: none !important;
+  transform: none !important;
+  margin: 0 !important;
+  padding-right: 0 !important;
 }
 </style>
