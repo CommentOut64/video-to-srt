@@ -422,7 +422,76 @@ onUnmounted(() => {
 onMounted(() => {
   // 页面加载时自动获取文件列表
   loadFiles()
+  
+  // 页面加载完成后，启动模型预加载
+  startInitialPreload()
 })
+
+// 初始模型预加载
+async function startInitialPreload() {
+  try {
+    console.log('[App] 系统启动，准备自动预加载模型...')
+    
+    // 延迟10秒确保前后端完全就绪
+    setTimeout(async () => {
+      try {
+        console.log('[App] 开始检查后端连接状态...')
+        
+        // 检查后端连接
+        const pingResponse = await fetch('/api/ping', { timeout: 5000 })
+        if (!pingResponse.ok) {
+          console.log('[App] 后端连接失败，跳过自动预加载')
+          return
+        }
+        console.log('[App] 后端连接正常')
+        
+        // 检查当前预加载状态
+        const statusResponse = await fetch('/api/models/preload/status', { timeout: 5000 })
+        if (statusResponse.ok) {
+          const statusResult = await statusResponse.json()
+          if (statusResult.success) {
+            const status = statusResult.data
+            console.log('[App] 当前预加载状态:', status)
+            
+            // 如果已经在预加载或已有模型，跳过
+            if (status.is_preloading) {
+              console.log('[App] 预加载已在进行中，跳过自动启动')
+              return
+            }
+            if (status.loaded_models > 0) {
+              console.log('[App] 模型已预加载完成，跳过自动启动')
+              return
+            }
+          }
+        }
+        
+        console.log('[App] 启动自动预加载...')
+        const preloadResponse = await fetch('/api/models/preload/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        })
+        
+        if (preloadResponse.ok) {
+          const result = await preloadResponse.json()
+          if (result.success) {
+            console.log('[App] ✅ 模型预加载已启动')
+            ElMessage.success('模型预加载已启动，可在右上角查看进度', { duration: 3000 })
+          } else {
+            console.log('[App] ⚠️ 预加载启动失败:', result.message)
+            ElMessage.info('模型将在首次使用时自动加载', { duration: 2000 })
+          }
+        } else {
+          console.log('[App] ❌ 预加载请求失败，状态码:', preloadResponse.status)
+        }
+      } catch (error) {
+        console.log('[App] ❌ 自动预加载异常:', error.message)
+        ElMessage.info('模型将在首次使用时自动加载', { duration: 2000 })
+      }
+    }, 10000) // 延迟10秒
+  } catch (error) {
+    console.log('[App] ❌ 预加载初始化失败:', error)
+  }
+}
 </script>
 
 <style scoped>

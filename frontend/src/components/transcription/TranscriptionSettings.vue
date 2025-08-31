@@ -126,8 +126,10 @@
 </template>
 
 <script setup>
-import { defineProps, defineEmits } from 'vue'
+import { defineProps, defineEmits, ref, watch, nextTick } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import ModelStatusButton from '../models/ModelStatusButton.vue'
+import { modelAPI } from '../../services/api.js'
 
 // 定义props
 const props = defineProps({
@@ -147,6 +149,80 @@ const emits = defineEmits([
   'reset-selection',
   'show-hardware'
 ])
+
+// 追踪原始设置用于检测变更
+const originalSettings = ref({})
+const hasModelSettingsChanged = ref(false)
+
+// 监听设置变化
+watch(() => props.settings, (newSettings, oldSettings) => {
+  if (!oldSettings) {
+    // 初始化时保存原始设置
+    originalSettings.value = { ...newSettings }
+    return
+  }
+  
+  // 检查模型相关参数是否变更
+  const modelRelatedKeys = ['model', 'compute_type', 'device']
+  const changed = modelRelatedKeys.some(key => 
+    newSettings[key] !== originalSettings.value[key]
+  )
+  
+  if (changed && !hasModelSettingsChanged.value) {
+    hasModelSettingsChanged.value = true
+    showModelReloadConfirm()
+  }
+}, { deep: true })
+
+// 显示模型重新加载确认对话框
+async function showModelReloadConfirm() {
+  try {
+    await ElMessageBox.confirm(
+      '检测到模型相关参数已修改，是否立即重新预加载模型以获得最佳性能？',
+      '参数变更提示',
+      {
+        confirmButtonText: '立即预加载',
+        cancelButtonText: '稍后手动',
+        type: 'info',
+        distinguishCancelAndClose: true
+      }
+    )
+    
+    // 用户确认，开始预加载
+    await startModelPreload()
+    
+  } catch (action) {
+    if (action === 'cancel') {
+      ElMessage.info('您可以稍后通过模型状态按钮手动预加载')
+    }
+  } finally {
+    // 更新原始设置和重置标志
+    originalSettings.value = { ...props.settings }
+    hasModelSettingsChanged.value = false
+  }
+}
+
+// 启动模型预加载
+async function startModelPreload() {
+  try {
+    const result = await modelAPI.startPreload()
+    if (result.success) {
+      ElMessage.success('模型预加载已启动，将在后台进行')
+    } else {
+      ElMessage.warning(result.message || '预加载启动失败，转录时将自动加载模型')
+    }
+  } catch (error) {
+    console.error('启动预加载失败:', error)
+    ElMessage.warning('预加载启动失败，转录时将自动加载模型')
+  }
+}
+
+// 初始化时保存设置
+nextTick(() => {
+  if (props.settings) {
+    originalSettings.value = { ...props.settings }
+  }
+})
 </script>
 
 <style scoped>

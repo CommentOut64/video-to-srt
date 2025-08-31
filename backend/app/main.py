@@ -4,6 +4,7 @@ import uuid
 import shutil
 import logging
 import asyncio
+import time
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +32,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动事件 - 初始化模型管理器和预加载"""
+    """应用启动事件 - 初始化模型管理器"""
     try:
         logger.info("服务启动中，初始化模型管理器...")
         
@@ -39,38 +40,11 @@ async def startup_event():
         model_manager = initialize_model_manager(preload_config)
         logger.info("模型管理器初始化成功")
         
-        # 异步启动预加载任务
-        asyncio.create_task(preload_models_on_startup())
+        # 不在启动时预加载模型，等待前端就绪后通过API调用
+        logger.info("后端服务已就绪，等待前端启动后进行模型预加载")
         
     except Exception as e:
         logger.error(f"启动初始化失败: {str(e)}", exc_info=True)
-
-async def preload_models_on_startup():
-    """启动时异步预加载模型"""
-    global preload_completed
-    
-    try:
-        logger.info("开始后台预加载模型...")
-        
-        def progress_callback(status):
-            logger.info(f"预加载进度: {status['progress']:.1f}%, 当前模型: {status['current_model']}")
-        
-        result = await preload_default_models(progress_callback)
-        
-        if result['success']:
-            logger.info(f"模型预加载成功! 已加载 {result['loaded_models']}/{result['total_models']} 个模型")
-        else:
-            logger.warning(f"模型预加载失败: {result.get('message', 'Unknown error')}")
-        
-        if result.get('errors'):
-            for error in result['errors']:
-                logger.warning(f"预加载错误: {error}")
-        
-        preload_completed = True
-        
-    except Exception as e:
-        logger.error(f"模型预加载异常: {str(e)}", exc_info=True)
-        preload_completed = True
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -112,8 +86,12 @@ preload_config = ModelPreloadConfig.get_preload_config()
 # 打印配置信息
 ModelPreloadConfig.print_config()
 
-# 全局预加载状态
-preload_completed = False
+# 全局预加载状态 - True表示可以开始新的预加载，False表示正在预加载中
+preload_available = True
+
+# 异步后台任务与惰性锁，避免接口阻塞事件循环
+preload_task = None  # type: ignore
+preload_task_lock = None  # type: ignore
 
 class TranscribeSettings(BaseModel):
     model: str = "medium"
@@ -502,38 +480,76 @@ async def get_models_cache_status():
 
 @app.post("/api/models/preload/start")
 async def start_models_preload():
-    """手动启动模型预加载"""
-    global preload_completed
-    
+    """手动启动模型预加载（异步后台任务，立即返回）"""
+    global preload_task, preload_task_lock
     try:
-        if not preload_completed:
-            return {
-                "success": False,
-                "message": "预加载正在进行中，请稍候"
-            }
-        
-        # 重置状态
-        preload_completed = False
-        
-        def progress_callback(status):
-            logger.info(f"手动预加载进度: {status['progress']:.1f}%, 当前模型: {status['current_model']}")
-        
-        result = await preload_default_models(progress_callback)
-        preload_completed = True
-        
-        return {
-            "success": result['success'],
-            "data": result,
-            "message": "预加载完成" if result['success'] else f"预加载失败: {result.get('message', 'Unknown error')}"
-        }
-        
+        logger.info("🚀 收到模型预加载请求")
+
+        # 检查模型管理器
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        if not model_manager:
+            logger.error("❌ 模型管理器未初始化")
+            return {"success": False, "message": "模型管理器未初始化"}
+
+        # 冷却窗口检查
+        status = model_manager.get_preload_status()
+        if (
+            status.get("failed_attempts", 0) >= status.get("max_retry_attempts", 3)
+            and time.time() - status.get("last_attempt_time", 0) < status.get("retry_cooldown", 30)
+        ):
+            remaining_time = int(status.get("retry_cooldown", 30) - (time.time() - status.get("last_attempt_time", 0)))
+            msg = f"预加载失败次数过多，请等待 {remaining_time} 秒后重试"
+            logger.warning(f"⚠️ {msg}")
+            return {"success": False, "message": msg, "failed_attempts": status.get("failed_attempts", 0)}
+
+        # 惰性创建锁
+        if preload_task_lock is None:
+            preload_task_lock = asyncio.Lock()
+
+        # 幂等检查：若已在进行中，直接返回success=true
+        async with preload_task_lock:
+            if preload_task is not None and not preload_task.done():
+                logger.info("ℹ️ 预加载后台任务已在运行，直接返回成功")
+                return {"success": True, "message": "预加载已在进行中"}
+            if status.get("is_preloading", False):
+                logger.info("ℹ️ 管理器状态显示预加载中，直接返回成功")
+                return {"success": True, "message": "预加载已在进行中"}
+
+            # 立即将模型管理器状态设置为预加载中（保持前端"加载中"逻辑）
+            model_manager._preload_status["is_preloading"] = True
+            logger.info("🔄 已将预加载状态设为True，前端将立即显示加载中")
+
+            # 启动后台任务，不要 await，接口立即返回
+            def progress_callback(p):
+                try:
+                    logger.info(f"📊 预加载进度: {p.get('progress', 0):.1f}%, 当前模型: {p.get('current_model', '')}")
+                except Exception:
+                    pass
+
+            async def _run_preload():
+                try:
+                    logger.info("🏁 开始执行模型预加载后台任务")
+                    result = await preload_default_models(progress_callback)
+                    if result.get("success"):
+                        logger.info(f"✅ 模型预加载成功: {result.get('loaded_models', 0)}/{result.get('total_models', 0)}")
+                    else:
+                        logger.warning(f"⚠️ 模型预加载未成功: {result.get('message', 'Unknown error')}")
+                except Exception as e:
+                    logger.error(f"❌ 预加载后台任务异常: {e}", exc_info=True)
+                finally:
+                    global preload_task
+                    preload_task = None
+                    logger.info("🔚 预加载后台任务结束")
+
+            preload_task = asyncio.create_task(_run_preload())
+            logger.info("✅ 已启动预加载后台任务，接口立即返回success=true")
+
+        return {"success": True, "message": "预加载已启动"}
+
     except Exception as e:
-        preload_completed = True
-        logger.error(f"手动启动预加载失败: {str(e)}", exc_info=True)
-        return {
-            "success": False,
-            "message": f"启动预加载失败: {str(e)}"
-        }
+        logger.error(f"❌ 模型预加载异常: {str(e)}", exc_info=True)
+        return {"success": False, "message": f"启动预加载失败: {str(e)}"}
 
 @app.post("/api/models/cache/clear")
 async def clear_models_cache():
@@ -561,6 +577,73 @@ async def clear_models_cache():
             "success": False,
             "message": f"清空缓存失败: {str(e)}"
         }
+
+@app.post("/api/models/preload/reset")
+async def reset_preload_attempts():
+    """重置预加载失败计数"""
+    try:
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        
+        if model_manager:
+            model_manager.reset_preload_attempts()
+            logger.info("手动重置预加载失败计数成功")
+            return {
+                "success": True,
+                "message": "预加载失败计数已重置"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "模型管理器未初始化"
+            }
+            
+    except Exception as e:
+        logger.error(f"重置预加载失败计数失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"重置失败: {str(e)}"
+        }
+
+@app.post("/api/shutdown")
+async def shutdown_server():
+    """优雅关闭服务器"""
+    try:
+        logger.info("收到关闭服务器请求")
+        
+        # 清理资源
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        if model_manager:
+            model_manager.clear_cache()
+            logger.info("已清理模型缓存")
+        
+        # 返回成功响应
+        response = {
+            "success": True,
+            "message": "服务器正在优雅关闭"
+        }
+        
+        # 异步关闭服务器
+        import asyncio
+        import os
+        asyncio.create_task(delayed_shutdown())
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"关闭服务器失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"关闭服务器失败: {str(e)}"
+        }
+
+async def delayed_shutdown():
+    """延迟关闭服务器，给响应时间返回"""
+    await asyncio.sleep(1)  # 等待1秒让响应返回
+    logger.info("服务器即将关闭...")
+    import os
+    os._exit(0)
 
 if __name__ == "__main__":
     import uvicorn
