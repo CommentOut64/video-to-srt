@@ -1,149 +1,121 @@
 <template>
-  <div class="layout">
-    <header>
-      <h1>Video To SRT 转录工具</h1>
-    </header>
-    <main>
-      <!-- 上传 -->
-      <section class="card">
-        <h2>1. 上传媒体文件</h2>
-        <input type="file" @change="onFile" accept="video/*,audio/*" />
-        <p v-if="fileName">
-          已选择: {{ fileName }}
-          <span v-if="fileSize">({{ formatFileSize(fileSize) }})</span>
-        </p>
-        <button :disabled="!file || uploading" @click="doUpload">
-          {{ uploading ? "上传中..." : "上传" }}
-        </button>
+  <el-container class="app-container">
+    <!-- 顶部标题 -->
+    <el-header class="header">
+      <el-row justify="center">
+        <el-col :span="24">
+          <h1 class="title">
+            <el-icon><VideoPlay /></el-icon>
+            Video To SRT 转录工具
+          </h1>
+        </el-col>
+      </el-row>
+    </el-header>
 
-        <!-- 上传进度条 -->
-        <div v-if="uploading" class="upload-progress">
-          <div class="progress-wrapper">
-            <div
-              class="progress-bar"
-              :style="{ width: uploadProgress + '%' }"
-            ></div>
-          </div>
-          <p>
-            上传进度: {{ uploadProgress }}% ({{ formatSpeed(uploadSpeed) }})
-          </p>
-        </div>
+    <!-- 主要内容区域 -->
+    <el-main class="main-content">
+      <el-row :gutter="20" justify="center">
+        <el-col :xs="24" :sm="20" :md="16" :lg="14" :xl="12">
+          
+          <!-- 1. 文件选择区域 -->
+          <FileSelector
+            :show-upload="showUpload"
+            :available-files="availableFiles"
+            :selected-file="selectedFile"
+            :loading-files="loadingFiles"
+            :creating="creating"
+            :uploading="uploading"
+            :upload-progress="uploadProgress"
+            :input-dir-path="inputDirPath"
+            :job-id="jobId"
+            @toggle-mode="toggleUploadMode"
+            @refresh-files="loadFiles"
+            @select-file="selectFile"
+            @clear-selection="clearSelection"
+            @create-job="createJob"
+            @upload-file="handleUpload"
+          />
 
-        <p v-if="uploadError" class="error">{{ uploadError }}</p>
-      </section>
+          <!-- 2. 参数设置区域 -->
+          <TranscriptionSettings
+            :job-id="jobId"
+            :settings="settings"
+            :starting="starting"
+            :processing="processing"
+            :canceling="canceling"
+            :can-restart="canRestart"
+            @start-job="startJob"
+            @cancel-job="cancelJob"
+            @restart-job="restartJob"
+            @reset-selection="resetSelection"
+            @show-hardware="showHardwareDialog = true"
+          />
 
-      <!-- 参数设置 -->
-      <section class="card" v-if="jobId">
-        <h2>2. 设置参数并开始</h2>
-        <form @submit.prevent="startJob">
-          <div class="grid">
-            <label
-              >模型
-              <select v-model="settings.model">
-                <option value="tiny">tiny</option>
-                <option value="base">base</option>
-                <option value="small">small</option>
-                <option value="medium">medium</option>
-                <option value="large-v2">large-v2</option>
-                <option value="large-v3">large-v3</option>
-              </select>
-            </label>
-            <label
-              >计算类型
-              <select v-model="settings.compute_type">
-                <option value="float16">float16</option>
-                <option value="float32">float32</option>
-                <option value="int8">int8</option>
-              </select>
-            </label>
-            <label
-              >设备
-              <select v-model="settings.device">
-                <option value="cuda">cuda</option>
-                <option value="cpu">cpu</option>
-              </select>
-            </label>
-            <label
-              >批大小<input
-                type="number"
-                v-model.number="settings.batch_size"
-                min="1"
-            /></label>
-            <label
-              >词级时间戳
-              <input type="checkbox" v-model="settings.word_timestamps" />
-            </label>
-          </div>
-          <div class="actions">
-            <button :disabled="processing || starting" type="submit">
-              {{ starting ? "启动中..." : "开始转录" }}
-            </button>
-            <button
-              type="button"
-              class="secondary"
-              :disabled="!processing || canceling"
-              @click="cancelJob"
-            >
-              {{ canceling ? "取消中..." : "取消任务" }}
-            </button>
-            <button
-              type="button"
-              class="secondary"
-              :disabled="processing || !canRestart"
-              @click="restartJob"
-            >
-              重新开始
-            </button>
-          </div>
-        </form>
-      </section>
+          <!-- 3. 进度显示区域 -->
+          <ProgressDisplay
+            :job-id="jobId"
+            :progress="progress"
+            :status="status"
+            :status-text="statusText"
+            :download-url="downloadUrl"
+            :last-error="lastError"
+            :phase="phase"
+            :language="language"
+            @download="downloadFile"
+            @copy-to-source="copyResultToSource"
+          />
 
-      <!-- 进度显示 -->
-      <section class="card" v-if="jobId">
-        <h2>3. 进度</h2>
-        <div class="progress-wrapper">
-          <div class="progress-bar" :style="{ width: progress + '%' }"></div>
-        </div>
-        <p class="phase">阶段: {{ phaseLabel }} ({{ progress }}%)</p>
-        <p>{{ statusText }}</p>
-        <p v-if="language">
-          检测语言: <strong>{{ language }}</strong>
-        </p>
-        <p v-if="status === 'failed'" class="error">
-          任务失败：{{ lastError }}
-        </p>
-        <a v-if="status === 'finished' && downloadUrl" :href="downloadUrl"
-          >下载 SRT</a
-        >
-      </section>
-    </main>
-  </div>
+        </el-col>
+      </el-row>
+    </el-main>
+
+    <!-- 硬件信息对话框 -->
+    <HardwareDialog v-model="showHardwareDialog" />
+  </el-container>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from "vue";
-import axios from "axios";
+import { ref, reactive, onMounted, onUnmounted } from "vue"
+import { ElMessage, ElMessageBox } from 'element-plus'
 
-const file = ref(null);
-const fileName = ref("");
-const fileSize = ref(0);
-const jobId = ref("");
-const status = ref("");
-const progress = ref(0);
-const statusText = ref("等待上传");
-const downloadUrl = ref("");
-const processing = ref(false);
-const uploading = ref(false);
-const uploadProgress = ref(0);
-const uploadSpeed = ref(0);
-const uploadError = ref("");
-const starting = ref(false);
-const canceling = ref(false);
-const lastError = ref("");
-const phase = ref("");
-const language = ref("");
-const canRestart = ref(false);
-const pollTimer = ref(null);
+// 导入组件
+import FileSelector from './components/file-management/FileSelector.vue'
+import TranscriptionSettings from './components/transcription/TranscriptionSettings.vue'
+import ProgressDisplay from './components/transcription/ProgressDisplay.vue'
+import HardwareDialog from './components/hardware/HardwareDialog.vue'
+import ModelStatusButton from './components/models/ModelStatusButton.vue'
+
+// 导入服务
+import { FileService } from './services/fileService.js'
+import { TranscriptionService } from './services/transcriptionService.js'
+
+// 文件选择相关
+const availableFiles = ref([])
+const selectedFile = ref(null)
+const loadingFiles = ref(false)
+const creating = ref(false)
+const inputDirPath = ref('input/')
+const uploading = ref(false)
+const uploadProgress = ref(0)
+const showUpload = ref(false) // 默认使用本地input模式
+
+// 硬件信息对话框
+const showHardwareDialog = ref(false)
+
+// 任务相关 
+const jobId = ref("")
+const status = ref("")
+const progress = ref(0)
+const statusText = ref("请先选择文件")
+const downloadUrl = ref("")
+const processing = ref(false)
+const starting = ref(false)
+const canceling = ref(false)
+const lastError = ref("")
+const phase = ref("")
+const language = ref("")
+const canRestart = ref(false)
+const pollTimer = ref(null)
 
 const settings = reactive({
   model: "medium",
@@ -151,319 +123,438 @@ const settings = reactive({
   device: "cuda",
   batch_size: 16,
   word_timestamps: false,
-});
+})
 
-const phaseMap = {
-  extract: "提取音频",
-  split: "分段",
-  transcribe: "转录",
-  srt: "生成字幕",
-  pending: "等待",
-  "": "等待",
-};
-const phaseLabel = computed(() => phaseMap[phase.value] || phase.value || "—");
-
-function onFile(e) {
-  file.value = e.target.files[0];
-  fileName.value = file.value?.name || "";
-  fileSize.value = file.value?.size || 0;
-  uploadProgress.value = 0;
-  uploadError.value = "";
-}
-
-// 格式化文件大小
-function formatFileSize(bytes) {
-  if (bytes === 0) return "0 Bytes";
-  const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-}
-
-// 格式化上传速度
-function formatSpeed(bytesPerSecond) {
-  if (bytesPerSecond === 0) return "0 B/s";
-  const k = 1024;
-  const sizes = ["B/s", "KB/s", "MB/s", "GB/s"];
-  const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k));
-  return (
-    parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
-  );
-}
-
-async function doUpload() {
-  if (!file.value) return;
-  uploading.value = true;
-  uploadError.value = "";
-  uploadProgress.value = 0;
-  uploadSpeed.value = 0;
-
+// 文件上传处理
+async function handleUpload(uploadFile) {
+  if (!uploadFile) {
+    ElMessage.warning('请选择文件')
+    return
+  }
+  
+  // 检查文件类型
+  if (!FileService.isSupportedFile(uploadFile.name)) {
+    ElMessage.error('不支持的文件格式，请上传视频或音频文件')
+    return
+  }
+  
+  uploading.value = true
+  uploadProgress.value = 0
+  
   try {
-    const fd = new FormData();
-    fd.append("file", file.value);
-
-    const startTime = Date.now();
-    let lastLoaded = 0;
-    let lastTime = startTime;
-
-    const { data } = await axios.post("/api/upload", fd, {
-      timeout: 0, // 不设置超时
-      onUploadProgress: (progressEvent) => {
-        const now = Date.now();
-        const loaded = progressEvent.loaded;
-        const total = progressEvent.total;
-
-        if (total) {
-          uploadProgress.value = Math.round((loaded / total) * 100);
-        }
-
-        // 计算上传速度
-        if (now - lastTime > 1000) {
-          // 每秒更新一次速度
-          const timeDiff = (now - lastTime) / 1000;
-          const bytesDiff = loaded - lastLoaded;
-          uploadSpeed.value = bytesDiff / timeDiff;
-          lastLoaded = loaded;
-          lastTime = now;
-        }
-      },
-    });
-
-    jobId.value = data.job_id;
-    status.value = "uploaded";
-    statusText.value = "文件已上传, 可开始转录";
-    canRestart.value = false;
-    uploadProgress.value = 100;
-    console.log("上传成功:", data);
-  } catch (e) {
-    console.error("上传失败:", e);
-    if (e.code === "ECONNABORTED") {
-      uploadError.value = "上传超时，请检查网络连接或尝试上传较小的文件";
-    } else if (e.response) {
-      uploadError.value = `上传失败: ${e.response.status} ${e.response.statusText}`;
-    } else if (e.request) {
-      uploadError.value = "网络连接失败，请检查后端服务是否正常运行";
-    } else {
-      uploadError.value = "上传失败: " + (e.message || e);
+    const data = await TranscriptionService.uploadFile(uploadFile.raw, (progressEvent) => {
+      uploadProgress.value = Math.round(
+        (progressEvent.loaded / progressEvent.total) * 100
+      )
+    })
+    
+    jobId.value = data.job_id
+    selectedFile.value = {
+      name: data.filename,
+      originalName: data.original_name,
+      size: uploadFile.size
     }
+    status.value = "ready"
+    statusText.value = "文件已上传，可开始转录"
+    canRestart.value = false
+    showUpload.value = false
+    
+    ElMessage.success('文件上传成功！转录任务已创建。')
+    
+    // 刷新文件列表
+    loadFiles()
+  } catch (error) {
+    console.error('文件上传失败:', error)
+    ElMessage.error('文件上传失败：' + (error.response?.data?.detail || error.message))
   } finally {
-    uploading.value = false;
+    uploading.value = false
+    uploadProgress.value = 0
   }
 }
 
-async function startJob() {
-  if (!jobId.value) return;
-  starting.value = true;
-  processing.value = true;
-  lastError.value = "";
+// 切换上传模式
+function toggleUploadMode() {
+  showUpload.value = !showUpload.value
+  if (showUpload.value) {
+    // 清除已选择的文件
+    selectedFile.value = null
+  }
+}
+
+// 加载可用文件列表
+async function loadFiles() {
+  loadingFiles.value = true
   try {
-    const fd = new FormData();
-    fd.append("job_id", jobId.value);
-    fd.append("settings", JSON.stringify(settings));
-    await axios.post("/api/start", fd);
-    poll();
-  } catch (e) {
-    statusText.value = "启动失败: " + (e?.message || e);
-    processing.value = false;
+    const data = await FileService.getFiles()
+    availableFiles.value = data.files || []
+    inputDirPath.value = data.input_dir || 'input/'
+    if (availableFiles.value.length === 0) {
+      ElMessage.info('input 目录中没有找到支持的媒体文件')
+    }
+  } catch (error) {
+    console.error('获取文件列表失败:', error)
+    ElMessage.error('获取文件列表失败：' + (error.response?.data?.detail || error.message))
   } finally {
-    starting.value = false;
+    loadingFiles.value = false
+  }
+}
+
+// 选择文件
+function selectFile(file) {
+  selectedFile.value = file
+  ElMessage.success(`已选择文件：${file.name}`)
+}
+
+// 清除选择
+function clearSelection() {
+  selectedFile.value = null
+}
+
+// 创建转录任务
+async function createJob() {
+  if (!selectedFile.value) {
+    ElMessage.warning('请先选择文件')
+    return
+  }
+  
+  creating.value = true
+  try {
+    const data = await TranscriptionService.createJob(selectedFile.value.name)
+    jobId.value = data.job_id
+    status.value = "ready"
+    statusText.value = "文件已准备就绪，可开始转录"
+    canRestart.value = false
+    
+    ElMessage.success('转录任务创建成功！')
+  } catch (error) {
+    console.error('创建任务失败:', error)
+    ElMessage.error('创建任务失败：' + (error.response?.data?.detail || error.message))
+  } finally {
+    creating.value = false
+  }
+}
+
+// 重置选择
+function resetSelection() {
+  ElMessageBox.confirm('确定要重新选择文件吗？这将清除当前的转录进度。', '确认操作', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    type: 'warning',
+  }).then(() => {
+    // 重置所有状态
+    selectedFile.value = null
+    jobId.value = ""
+    status.value = ""
+    progress.value = 0
+    statusText.value = "请先选择文件"
+    downloadUrl.value = ""
+    processing.value = false
+    canRestart.value = false
+    lastError.value = ""
+    phase.value = ""
+    language.value = ""
+    
+    // 清除轮询定时器
+    if (pollTimer.value) {
+      clearTimeout(pollTimer.value)
+      pollTimer.value = null
+    }
+    
+    // 刷新文件列表
+    loadFiles()
+    ElMessage.success('已重置，可以重新选择文件')
+  }).catch(() => {
+    // 用户取消操作
+  })
+}
+
+async function startJob() {
+  if (!jobId.value) {
+    ElMessage.warning('请先选择文件并创建任务')
+    return
+  }
+  
+  starting.value = true
+  processing.value = true
+  lastError.value = ""
+  
+  try {
+    await TranscriptionService.startJob(jobId.value, settings)
+    ElMessage.success('转录任务已启动！')
+    poll() // 开始轮询状态
+  } catch (e) {
+    const errorMessage = "启动失败: " + (e?.message || e)
+    statusText.value = errorMessage
+    processing.value = false
+    ElMessage.error(errorMessage)
+  } finally {
+    starting.value = false
   }
 }
 
 async function cancelJob() {
-  if (!jobId.value) return;
-  canceling.value = true;
+  if (!jobId.value) return
+  
   try {
-    await axios.post(`/api/cancel/${jobId.value}`);
-  } catch (e) {
-    // ignore
+    await ElMessageBox.confirm('确定要取消当前转录任务吗？', '确认操作', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    
+    canceling.value = true
+    await TranscriptionService.cancelJob(jobId.value)
+    ElMessage.success('任务已取消')
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('取消任务失败')
+    }
   } finally {
-    canceling.value = false;
+    canceling.value = false
   }
 }
 
 async function restartJob() {
-  if (!jobId.value) return;
-  status.value = "";
-  progress.value = 0;
-  phase.value = "";
-  statusText.value = "重新开始";
-  await startJob();
-}
-
-async function poll() {
-  clearTimeout(pollTimer.value);
-  if (!jobId.value) return;
+  if (!jobId.value) return
+  
   try {
-    const { data } = await axios.get(`/api/status/${jobId.value}`);
-    if (data.error) {
-      statusText.value = data.error;
-      processing.value = false;
-      return;
+    await ElMessageBox.confirm('确定要重新转录当前文件吗？', '确认操作', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    
+    // 重置转录相关状态
+    status.value = ""
+    progress.value = 0
+    phase.value = ""
+    statusText.value = "重新开始转录"
+    downloadUrl.value = ""
+    lastError.value = ""
+    language.value = ""
+    canRestart.value = false
+    
+    // 清除之前的轮询
+    if (pollTimer.value) {
+      clearTimeout(pollTimer.value)
+      pollTimer.value = null
     }
-    status.value = data.status;
-    progress.value = data.progress || 0;
-    statusText.value = data.message || data.status;
-    phase.value = data.phase || "";
-    language.value = data.language || "";
-    lastError.value = data.error || "";
-    if (status.value === "finished") {
-      processing.value = false;
-      downloadUrl.value = `/api/download/${jobId.value}`;
-      canRestart.value = true;
-    } else if (status.value === "failed" || status.value === "canceled") {
-      processing.value = false;
-      canRestart.value = true;
-    } else {
-      pollTimer.value = setTimeout(poll, 1500);
+    
+    await startJob()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('重新转录失败')
     }
-  } catch (e) {
-    // 网络错误：稍后重试
-    pollTimer.value = setTimeout(poll, 2500);
   }
 }
 
-onMounted(() => {});
+async function poll() {
+  clearTimeout(pollTimer.value)
+  if (!jobId.value) return
+  
+  try {
+    const data = await TranscriptionService.getJobStatus(jobId.value)
+    if (data.error) {
+      statusText.value = data.error
+      processing.value = false
+      return
+    }
+    
+    status.value = data.status
+    progress.value = data.progress || 0
+    statusText.value = data.message || data.status
+    phase.value = data.phase || ""
+    language.value = data.language || ""
+    lastError.value = data.error || ""
+    
+    if (status.value === "finished") {
+      processing.value = false
+      downloadUrl.value = TranscriptionService.getDownloadUrl(jobId.value)
+      canRestart.value = true
+      ElMessage.success('转录完成！可以下载字幕文件了。')
+    } else if (status.value === "failed" || status.value === "canceled") {
+      processing.value = false
+      canRestart.value = true
+      if (status.value === "failed") {
+        ElMessage.error('转录失败：' + (lastError.value || '未知错误'))
+      }
+    } else {
+      // 继续轮询
+      pollTimer.value = setTimeout(poll, 1500)
+    }
+  } catch (e) {
+    // 网络错误：稍后重试
+    pollTimer.value = setTimeout(poll, 2500)
+  }
+}
+
+// 下载文件
+function downloadFile() {
+  if (downloadUrl.value) {
+    window.open(downloadUrl.value, '_blank')
+    ElMessage.success('开始下载字幕文件')
+  }
+}
+
+// 复制结果到源目录
+async function copyResultToSource() {
+  if (!jobId.value) {
+    ElMessage.warning('没有可复制的结果')
+    return
+  }
+  
+  try {
+    await TranscriptionService.copyResultToSource(jobId.value)
+    ElMessage.success('字幕文件已复制到源文件目录！')
+  } catch (error) {
+    console.error('复制结果失败:', error)
+    ElMessage.error('复制结果失败：' + (error.response?.data?.detail || error.message))
+  }
+}
+
+// 组件卸载时清理定时器
+onUnmounted(() => {
+  if (pollTimer.value) {
+    clearTimeout(pollTimer.value)
+  }
+})
+
+onMounted(() => {
+  // 页面加载时自动获取文件列表
+  loadFiles()
+  
+  // 页面加载完成后，启动模型预加载
+  startInitialPreload()
+})
+
+// 初始模型预加载
+async function startInitialPreload() {
+  try {
+    console.log('[App] 系统启动，准备自动预加载模型...')
+    
+    // 延迟10秒确保前后端完全就绪
+    setTimeout(async () => {
+      try {
+        console.log('[App] 开始检查后端连接状态...')
+        
+        // 检查后端连接
+        const pingResponse = await fetch('/api/ping', { timeout: 5000 })
+        if (!pingResponse.ok) {
+          console.log('[App] 后端连接失败，跳过自动预加载')
+          return
+        }
+        console.log('[App] 后端连接正常')
+        
+        // 检查当前预加载状态
+        const statusResponse = await fetch('/api/models/preload/status', { timeout: 5000 })
+        if (statusResponse.ok) {
+          const statusResult = await statusResponse.json()
+          if (statusResult.success) {
+            const status = statusResult.data
+            console.log('[App] 当前预加载状态:', status)
+            
+            // 如果已经在预加载或已有模型，跳过
+            if (status.is_preloading) {
+              console.log('[App] 预加载已在进行中，跳过自动启动')
+              return
+            }
+            if (status.loaded_models > 0) {
+              console.log('[App] 模型已预加载完成，跳过自动启动')
+              return
+            }
+          }
+        }
+        
+        console.log('[App] 启动自动预加载...')
+        const preloadResponse = await fetch('/api/models/preload/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        })
+        
+        if (preloadResponse.ok) {
+          const result = await preloadResponse.json()
+          if (result.success) {
+            console.log('[App] ✅ 模型预加载已启动')
+            ElMessage.success('模型预加载已启动，可在右上角查看进度', { duration: 3000 })
+          } else {
+            console.log('[App] ⚠️ 预加载启动失败:', result.message)
+            ElMessage.info('模型将在首次使用时自动加载', { duration: 2000 })
+          }
+        } else {
+          console.log('[App] ❌ 预加载请求失败，状态码:', preloadResponse.status)
+        }
+      } catch (error) {
+        console.log('[App] ❌ 自动预加载异常:', error.message)
+        ElMessage.info('模型将在首次使用时自动加载', { duration: 2000 })
+      }
+    }, 10000) // 延迟10秒
+  } catch (error) {
+    console.log('[App] ❌ 预加载初始化失败:', error)
+  }
+}
 </script>
 
-<style>
-body,
-html {
-  margin: 0;
-  padding: 0;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
-  background: #f5f7fa;
-  color: #222;
+<style scoped>
+.app-container {
+  min-height: 100vh;
 }
-.layout {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 24px;
-}
-header {
+
+.header {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
   text-align: center;
-  margin-bottom: 24px;
+  padding: 30px 0;
 }
-h1 {
+
+.title {
+  color: #409eff;
+  font-size: 2.5rem;
+  font-weight: 700;
   margin: 0;
-  font-size: 28px;
-  letter-spacing: 1px;
-}
-main {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-.card {
-  background: #fff;
-  padding: 20px;
-  border-radius: 12px;
-  box-shadow: 0 4px 16px -4px rgba(0, 0, 0, 0.08);
-  border: 1px solid #e5e9ef;
-}
-.card h2 {
-  margin-top: 0;
-  font-size: 18px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 16px;
 }
-button {
-  background: #4f46e5;
-  color: #fff;
-  border: none;
-  padding: 10px 20px;
+
+.title .el-icon {
+  font-size: 2.5rem;
+}
+
+.main-content {
+  padding: 40px 20px;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .title {
+    font-size: 2rem;
+  }
+  
+  .title .el-icon {
+    font-size: 2rem;
+  }
+  
+  .main-content {
+    padding: 20px 10px;
+  }
+}
+
+/* 自定义 Element Plus 样式 */
+:deep(.el-card__header) {
+  background: linear-gradient(90deg, #f8f9fa, #e9ecef);
+  border-bottom: 2px solid #dee2e6;
+}
+
+:deep(.el-button) {
   border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-  transition: 0.2s;
-}
-button:hover:not(:disabled) {
-  background: #4338ca;
-}
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 12px;
-  margin: 12px 0;
-}
-label {
-  font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  color: #555;
-}
-select,
-input[type="number"] {
-  padding: 6px 8px;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  font-size: 14px;
-  background: #fff;
-}
-.progress-wrapper {
-  height: 16px;
-  background: #eef1f5;
-  border-radius: 8px;
-  overflow: hidden;
-  margin: 8px 0 4px;
-  position: relative;
-}
-.progress-bar {
-  height: 100%;
-  background: linear-gradient(90deg, #6366f1, #818cf8);
-  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-}
-a {
-  color: #2563eb;
-  text-decoration: none;
   font-weight: 500;
+  transition: all 0.3s ease;
 }
-a:hover {
-  text-decoration: underline;
-}
-.actions {
-  display: flex;
-  gap: 12px;
-  margin-top: 12px;
-  flex-wrap: wrap;
-}
-button.secondary {
-  background: #64748b;
-}
-button.secondary:hover:not(:disabled) {
-  background: #475569;
-}
-.error {
-  color: #dc2626;
-  font-size: 13px;
-  margin: 4px 0;
-}
-.phase {
-  font-size: 13px;
-  color: #555;
-  margin: 4px 0;
-}
-.upload-progress {
-  margin-top: 12px;
-  padding: 12px;
-  background: #f8fafc;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-}
-.upload-progress .progress-wrapper {
-  margin: 8px 0;
-}
-.upload-progress p {
-  margin: 4px 0;
-  font-size: 13px;
-  color: #475569;
+
+:deep(.el-tag) {
+  border-radius: 6px;
+  font-weight: 500;
 }
 </style>

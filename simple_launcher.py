@@ -176,22 +176,77 @@ class SimpleVideoToSRTLauncher:
             self.log(f"启动前端服务失败: {e}", "ERROR")
             return False
     
+    def start_model_preload(self):
+        """异步启动模型预加载"""
+        def preload_task():
+            try:
+                # 等待后端完全就绪
+                time.sleep(5)
+                self.log("开始后台预加载模型...")
+                response = requests.post(
+                    f"http://{self.backend_host}:{self.backend_port}/api/models/preload/start",
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('success'):
+                        self.log("模型预加载已在后台启动", "SUCCESS")
+                    else:
+                        self.log(f"模型预加载启动失败: {result.get('message', '未知错误')}", "WARNING")
+                else:
+                    self.log(f"模型预加载请求失败，状态码: {response.status_code}", "WARNING")
+            except Exception as e:
+                self.log(f"模型预加载启动异常: {e}, 模型将在首次使用时自动加载", "INFO")
+        
+        # 在后台线程中启动预加载
+        threading.Thread(target=preload_task, daemon=True).start()
+    
     def cleanup(self):
         """清理资源"""
         self.log("正在关闭服务...")
         self.running = False
         
-        for process, name in [(self.backend_process, "后端"), (self.frontend_process, "前端")]:
+        # 更快速的进程清理
+        processes = [
+            (self.backend_process, "后端"),
+            (self.frontend_process, "前端")
+        ]
+        
+        for process, name in processes:
             if process:
                 try:
-                    process.terminate()
-                    process.wait(timeout=5)
-                    self.log(f"{name}服务已关闭", "SUCCESS")
-                except:
-                    try:
+                    # 立即终止进程
+                    if hasattr(process, 'terminate'):
+                        process.terminate()
+                    else:
                         process.kill()
+                    
+                    # 等待较短时间
+                    try:
+                        process.wait(timeout=2)
+                        self.log(f"{name}服务已关闭", "SUCCESS")
                     except:
-                        pass
+                        # 如果超时，强制杀死
+                        try:
+                            process.kill()
+                            self.log(f"{name}服务已强制关闭", "WARNING")
+                        except:
+                            pass
+                except Exception as e:
+                    self.log(f"关闭{name}服务时出错: {e}", "WARNING")
+        
+        # 额外清理端口占用
+        try:
+            for port in [self.backend_port, self.frontend_port]:
+                for conn in psutil.net_connections():
+                    if hasattr(conn, 'laddr') and conn.laddr.port == port:
+                        try:
+                            process = psutil.Process(conn.pid)
+                            process.terminate()
+                        except:
+                            pass
+        except:
+            pass
     
     def signal_handler(self, signum, frame):
         """信号处理器"""
@@ -225,7 +280,10 @@ class SimpleVideoToSRTLauncher:
                 input("按回车键退出...")
                 return False
             
-            # 4. 打开浏览器
+            # 4. 前端启动后，异步启动模型预加载
+            self.start_model_preload()
+            
+            # 5. 打开浏览器
             try:
                 url = f"http://localhost:{self.frontend_port}"
                 self.log(f"打开浏览器: {url}")
@@ -242,6 +300,7 @@ class SimpleVideoToSRTLauncher:
             print()
             print("📌 注意事项：")
             print("   • 前后端服务在独立的命令行窗口中运行")
+            print("   • 模型正在后台异步预加载，不影响文件选择等操作")
             print("   • 请保持这些窗口打开")
             print("   • 按 Ctrl+C 退出并停止所有服务")
             print()

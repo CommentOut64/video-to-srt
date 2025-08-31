@@ -2,19 +2,25 @@ import os
 import sys
 import uuid
 import shutil
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import logging
+import asyncio
+import time
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
-from typing import Optional
+from typing import Optional, List
+from datetime import datetime
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from processor import JobSettings, get_processor
+from processor import JobSettings, CPUAffinityConfig, get_processor, initialize_model_manager, preload_default_models, get_preload_status, get_cache_status
+from services.model_preload_manager import PreloadConfig
+from config.model_config import ModelPreloadConfig
 
-app = FastAPI(title="Video To SRT API", version="0.2.0")
+app = FastAPI(title="Video To SRT API", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,9 +30,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-JOBS_DIR = os.path.join(os.getcwd(), "jobs")
-os.makedirs(JOBS_DIR, exist_ok=True)
+@app.on_event("startup")
+async def startup_event():
+    """应用启动事件 - 初始化模型管理器"""
+    try:
+        logger.info("服务启动中，初始化模型管理器...")
+        
+        # 初始化模型管理器
+        model_manager = initialize_model_manager(preload_config)
+        logger.info("模型管理器初始化成功")
+        
+        # 不在启动时预加载模型，等待前端就绪后通过API调用
+        logger.info("后端服务已就绪，等待前端启动后进行模型预加载")
+        
+    except Exception as e:
+        logger.error(f"启动初始化失败: {str(e)}", exc_info=True)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭事件 - 清理资源"""
+    try:
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        if model_manager:
+            model_manager.clear_cache()
+            logger.info("已清理模型缓存")
+    except Exception as e:
+        logger.error(f"清理资源失败: {str(e)}")
+
+# 目录配置
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output") 
+JOBS_DIR = os.path.join(BASE_DIR, "jobs")
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
+
+print(f"DEBUG: BASE_DIR = {BASE_DIR}")
+print(f"DEBUG: INPUT_DIR = {INPUT_DIR}")
+print(f"DEBUG: INPUT_DIR exists = {os.path.exists(INPUT_DIR)}")
+
+# 确保目录存在
+for dir_path in [INPUT_DIR, OUTPUT_DIR, JOBS_DIR, TEMP_DIR]:
+    os.makedirs(dir_path, exist_ok=True)
+
 proc = get_processor(JOBS_DIR)
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 初始化模型预加载管理器
+preload_config = ModelPreloadConfig.get_preload_config()
+
+# 打印配置信息
+ModelPreloadConfig.print_config()
+
+# 全局预加载状态 - True表示可以开始新的预加载，False表示正在预加载中
+preload_available = True
+
+# 异步后台任务与惰性锁，避免接口阻塞事件循环
+preload_task = None  # type: ignore
+preload_task_lock = None  # type: ignore
 
 class TranscribeSettings(BaseModel):
     model: str = "medium"
@@ -34,42 +99,144 @@ class TranscribeSettings(BaseModel):
     device: str = "cuda"
     batch_size: int = 16
     word_timestamps: bool = False
+    # CPU亲和性配置
+    cpu_affinity_enabled: bool = True
+    cpu_affinity_strategy: str = "auto"  # "auto", "half", "custom"
+    cpu_affinity_custom_cores: Optional[List[int]] = None
+    cpu_affinity_exclude_cores: Optional[List[int]] = None
+
+class UploadResponse(BaseModel):
+    job_id: str
+    filename: str
+    original_name: str
+    message: str
+
+class FileInfo(BaseModel):
+    name: str
+    size: int
+    modified: str
+    path: str
+
+def get_file_size_str(size_bytes):
+    """格式化文件大小"""
+    if size_bytes == 0:
+        return "0 B"
+    size_names = ["B", "KB", "MB", "GB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(size_names) - 1:
+        size_bytes /= 1024.0
+        i += 1
+    return f"{size_bytes:.1f} {size_names[i]}"
+
+def is_video_or_audio_file(filename):
+    """检查是否为支持的视频或音频文件"""
+    video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v'}
+    audio_extensions = {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma'}
+    ext = os.path.splitext(filename.lower())[1]
+    return ext in video_extensions or ext in audio_extensions
+
+@app.get("/api/files")
+async def list_files():
+    """获取输入目录中的所有媒体文件"""
+    try:
+        files = []
+        if os.path.exists(INPUT_DIR):
+            for filename in os.listdir(INPUT_DIR):
+                file_path = os.path.join(INPUT_DIR, filename)
+                if os.path.isfile(file_path) and is_video_or_audio_file(filename):
+                    stat = os.stat(file_path)
+                    files.append(FileInfo(
+                        name=filename,
+                        size=stat.st_size,
+                        modified=datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                        path=file_path
+                    ))
+        
+        # 按修改时间倒序排列
+        files.sort(key=lambda x: x.modified, reverse=True)
+        return {"files": files, "input_dir": INPUT_DIR}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取文件列表失败: {str(e)}")
+
+@app.delete("/api/files/{filename}")
+async def delete_file(filename: str):
+    """删除input目录中的文件"""
+    try:
+        file_path = os.path.join(INPUT_DIR, filename)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="文件不存在")
+        
+        os.remove(file_path)
+        return {"success": True, "message": f"文件 {filename} 已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除文件失败: {str(e)}")
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)):
-    print(f"收到上传请求: {file.filename}")
-    
-    # 检查文件大小 (可选)
-    # if file.size and file.size > 1024 * 1024 * 1024:  # 1GB 限制
-    #     return {"error": "文件过大，请上传小于1GB的文件"}
-    
-    job_id = uuid.uuid4().hex
-    job_dir = os.path.join(JOBS_DIR, job_id)
-    os.makedirs(job_dir, exist_ok=True)
-    input_path = os.path.join(job_dir, file.filename)
-    print(f"保存文件到: {input_path}")
-    
-    # 使用异步流式写入，支持大文件
+async def upload_file(file: UploadFile = File(...)):
+    """上传文件并自动创建转录任务"""
     try:
-        with open(input_path, 'wb') as f:
-            while chunk := await file.read(1024 * 1024):  # 1MB chunks
-                f.write(chunk)
+        # 验证文件类型
+        if not is_video_or_audio_file(file.filename):
+            raise HTTPException(status_code=400, detail="不支持的文件格式")
         
-        print(f"文件保存完成，文件大小: {os.path.getsize(input_path)} bytes")
-        print(f"创建任务: {job_id}")
+        # 保存用户原始文件路径信息
+        original_filename = file.filename
         
+        # 将文件保存到input目录
+        input_path = os.path.join(INPUT_DIR, original_filename)
+        
+        # 如果同名文件已存在，添加时间戳
+        counter = 1
+        base_name, ext = os.path.splitext(original_filename)
+        while os.path.exists(input_path):
+            new_filename = f"{base_name}_{counter}{ext}"
+            input_path = os.path.join(INPUT_DIR, new_filename)
+            original_filename = new_filename
+            counter += 1
+        
+        # 保存文件
+        with open(input_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # 创建转录任务
+        job_id = uuid.uuid4().hex
         settings = JobSettings()
-        proc.create_job(file.filename, input_path, settings, job_id=job_id)
-        return {"job_id": job_id, "filename": file.filename}
+        proc.create_job(original_filename, input_path, settings, job_id=job_id)
         
+        return {
+            "job_id": job_id, 
+            "filename": original_filename,
+            "original_name": file.filename,
+            "message": "文件上传成功，转录任务已创建"
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"文件上传失败: {e}")
-        # 清理失败的文件
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(job_dir):
-            os.rmdir(job_dir)
-        raise HTTPException(status_code=500, detail=f"文件上传失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"上传文件失败: {str(e)}")
+
+@app.post("/api/create-job")
+async def create_job(filename: str = Form(...)):
+    """为指定文件创建转录任务（保留兼容性）"""
+    try:
+        input_path = os.path.join(INPUT_DIR, filename)
+        if not os.path.exists(input_path):
+            raise HTTPException(status_code=404, detail="文件不存在")
+        
+        if not is_video_or_audio_file(filename):
+            raise HTTPException(status_code=400, detail="不支持的文件格式")
+        
+        job_id = uuid.uuid4().hex
+        settings = JobSettings()
+        proc.create_job(filename, input_path, settings, job_id=job_id)
+        
+        return {"job_id": job_id, "filename": filename}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"创建任务失败: {str(e)}")
 
 @app.post("/api/start")
 async def start(job_id: str = Form(...), settings: str = Form(...)):
@@ -77,8 +244,25 @@ async def start(job_id: str = Form(...), settings: str = Form(...)):
     job = proc.get_job(job_id)
     if not job:
         return {"error": "无效 job_id"}
+    
+    # 创建CPU亲和性配置
+    cpu_config = CPUAffinityConfig(
+        enabled=settings_obj.cpu_affinity_enabled,
+        strategy=settings_obj.cpu_affinity_strategy,
+        custom_cores=settings_obj.cpu_affinity_custom_cores,
+        exclude_cores=settings_obj.cpu_affinity_exclude_cores
+    )
+    
     # 覆盖设置
-    job.settings = JobSettings(**settings_obj.dict())
+    job.settings = JobSettings(
+        model=settings_obj.model,
+        compute_type=settings_obj.compute_type,
+        device=settings_obj.device,
+        batch_size=settings_obj.batch_size,
+        word_timestamps=settings_obj.word_timestamps,
+        cpu_affinity=cpu_config
+    )
+    
     proc.start_job(job_id)
     return {"job_id": job_id, "started": True}
 
@@ -98,19 +282,371 @@ async def status(job_id: str):
     return job.to_dict()
 
 @app.get("/api/download/{job_id}")
-async def download(job_id: str):
+async def download(job_id: str, copy_to_source: bool = False):
     job = proc.get_job(job_id)
     if not job:
-        return {"error": "未找到"}
+        raise HTTPException(status_code=404, detail="任务未找到")
+    
     if job.srt_path and os.path.exists(job.srt_path):
-        return FileResponse(path=job.srt_path, filename=os.path.basename(job.srt_path), media_type='text/plain')
-    return {"error": "结果未生成"}
+        filename = os.path.basename(job.srt_path)
+        
+        # 如果需要复制到源文件目录
+        if copy_to_source:
+            # 获取原始文件路径的目录
+            source_dir = os.path.dirname(job.input_path)
+            source_srt_path = os.path.join(source_dir, filename)
+            
+            try:
+                # 复制SRT文件到源文件目录
+                shutil.copy2(job.srt_path, source_srt_path)
+                print(f"SRT文件已复制到源目录: {source_srt_path}")
+            except Exception as e:
+                print(f"复制到源目录失败: {e}")
+        
+        # 同时复制到输出目录
+        output_path = os.path.join(OUTPUT_DIR, filename)
+        try:
+            if not os.path.exists(output_path):
+                shutil.copy2(job.srt_path, output_path)
+            
+            return FileResponse(
+                path=output_path, 
+                filename=filename, 
+                media_type='text/plain; charset=utf-8'
+            )
+        except Exception as e:
+            # 如果复制失败，直接返回原文件
+            return FileResponse(
+                path=job.srt_path, 
+                filename=filename, 
+                media_type='text/plain; charset=utf-8'
+            )
+    
+    raise HTTPException(status_code=404, detail="字幕文件未生成")
+
+@app.post("/api/copy-result/{job_id}")
+async def copy_result_to_source(job_id: str):
+    """将转录结果复制到源文件目录"""
+    job = proc.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务未找到")
+    
+    if not job.srt_path or not os.path.exists(job.srt_path):
+        raise HTTPException(status_code=404, detail="字幕文件未生成")
+    
+    try:
+        # 获取原始文件目录
+        if hasattr(job, 'original_path') and job.original_path:
+            source_dir = os.path.dirname(job.original_path)
+        else:
+            # 如果没有original_path，使用input_path的同级目录
+            source_dir = os.path.dirname(job.input_path)
+        
+        # 生成目标路径
+        srt_filename = os.path.basename(job.srt_path)
+        target_path = os.path.join(source_dir, srt_filename)
+        
+        # 复制文件
+        shutil.copy2(job.srt_path, target_path)
+        
+        return {
+            "success": True,
+            "message": f"字幕文件已复制到: {target_path}",
+            "target_path": target_path
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"复制文件失败: {str(e)}")
 
 @app.get("/api/ping")
 async def ping():
     return {"pong": True}
 
+@app.get("/api/cpu-info")
+async def get_cpu_info():
+    """获取系统CPU信息和亲和性支持状态"""
+    try:
+        cpu_info = proc.cpu_manager.get_system_info()
+        return {
+            "success": True,
+            "cpu_info": cpu_info,
+            "available_strategies": ["auto", "half", "custom"]
+        }
+    except Exception as e:
+        return {
+            "success": False, 
+            "error": str(e),
+            "cpu_info": {"supported": False}
+        }
+
+@app.get("/api/hardware/basic")
+async def get_hardware_basic():
+    """获取核心硬件信息"""
+    try:
+        # 创建临时的硬件检测服务以获取信息
+        from services.hardware_service import get_hardware_detector
+        detector = get_hardware_detector()
+        hardware_info = detector.detect()
+        
+        return {
+            "success": True,
+            "hardware": hardware_info.to_dict(),
+            "message": "硬件信息获取成功"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"获取硬件信息失败: {str(e)}"
+        }
+
+@app.get("/api/hardware/optimize")
+async def get_hardware_optimization():
+    """获取基于硬件的优化配置"""
+    try:
+        from services.hardware_service import get_hardware_detector, get_hardware_optimizer
+        detector = get_hardware_detector()
+        optimizer = get_hardware_optimizer()
+        
+        hardware_info = detector.detect()
+        optimization_config = optimizer.get_optimization_config(hardware_info)
+        
+        return {
+            "success": True,
+            "optimization": optimization_config.to_dict(),
+            "message": "优化配置获取成功"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"获取优化配置失败: {str(e)}"
+        }
+
+@app.get("/api/hardware/status")
+async def get_hardware_status():
+    """获取完整的硬件状态和优化信息"""
+    try:
+        from services.hardware_service import get_hardware_detector, get_hardware_optimizer
+        detector = get_hardware_detector()
+        optimizer = get_hardware_optimizer()
+        
+        hardware_info = detector.detect()
+        optimization_config = optimizer.get_optimization_config(hardware_info)
+        
+        return {
+            "success": True,
+            "hardware": hardware_info.to_dict(),
+            "optimization": optimization_config.to_dict(),
+            "message": "硬件状态获取成功"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"获取硬件状态失败: {str(e)}"
+        }
+
+# 模型管理API端点
+@app.get("/api/models/preload/status")
+async def get_models_preload_status():
+    """获取模型预加载状态"""
+    try:
+        status = get_preload_status()
+        return {
+            "success": True,
+            "data": status,
+            "message": "获取预加载状态成功"
+        }
+    except Exception as e:
+        logger.error(f"获取预加载状态失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"获取预加载状态失败: {str(e)}"
+        }
+
+@app.get("/api/models/cache/status")
+async def get_models_cache_status():
+    """获取模型缓存状态"""
+    try:
+        status = get_cache_status()
+        return {
+            "success": True,
+            "data": status,
+            "message": "获取缓存状态成功"
+        }
+    except Exception as e:
+        logger.error(f"获取缓存状态失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"获取缓存状态失败: {str(e)}"
+        }
+
+@app.post("/api/models/preload/start")
+async def start_models_preload():
+    """手动启动模型预加载（异步后台任务，立即返回）"""
+    global preload_task, preload_task_lock
+    try:
+        logger.info("🚀 收到模型预加载请求")
+
+        # 检查模型管理器
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        if not model_manager:
+            logger.error("❌ 模型管理器未初始化")
+            return {"success": False, "message": "模型管理器未初始化"}
+
+        # 冷却窗口检查
+        status = model_manager.get_preload_status()
+        if (
+            status.get("failed_attempts", 0) >= status.get("max_retry_attempts", 3)
+            and time.time() - status.get("last_attempt_time", 0) < status.get("retry_cooldown", 30)
+        ):
+            remaining_time = int(status.get("retry_cooldown", 30) - (time.time() - status.get("last_attempt_time", 0)))
+            msg = f"预加载失败次数过多，请等待 {remaining_time} 秒后重试"
+            logger.warning(f"⚠️ {msg}")
+            return {"success": False, "message": msg, "failed_attempts": status.get("failed_attempts", 0)}
+
+        # 惰性创建锁
+        if preload_task_lock is None:
+            preload_task_lock = asyncio.Lock()
+
+        # 幂等检查：若已在进行中，直接返回success=true
+        async with preload_task_lock:
+            if preload_task is not None and not preload_task.done():
+                logger.info("ℹ️ 预加载后台任务已在运行，直接返回成功")
+                return {"success": True, "message": "预加载已在进行中"}
+            if status.get("is_preloading", False):
+                logger.info("ℹ️ 管理器状态显示预加载中，直接返回成功")
+                return {"success": True, "message": "预加载已在进行中"}
+
+            # 立即将模型管理器状态设置为预加载中（保持前端"加载中"逻辑）
+            model_manager._preload_status["is_preloading"] = True
+            logger.info("🔄 已将预加载状态设为True，前端将立即显示加载中")
+
+            # 启动后台任务，不要 await，接口立即返回
+            def progress_callback(p):
+                try:
+                    logger.info(f"📊 预加载进度: {p.get('progress', 0):.1f}%, 当前模型: {p.get('current_model', '')}")
+                except Exception:
+                    pass
+
+            async def _run_preload():
+                try:
+                    logger.info("🏁 开始执行模型预加载后台任务")
+                    result = await preload_default_models(progress_callback)
+                    if result.get("success"):
+                        logger.info(f"✅ 模型预加载成功: {result.get('loaded_models', 0)}/{result.get('total_models', 0)}")
+                    else:
+                        logger.warning(f"⚠️ 模型预加载未成功: {result.get('message', 'Unknown error')}")
+                except Exception as e:
+                    logger.error(f"❌ 预加载后台任务异常: {e}", exc_info=True)
+                finally:
+                    global preload_task
+                    preload_task = None
+                    logger.info("🔚 预加载后台任务结束")
+
+            preload_task = asyncio.create_task(_run_preload())
+            logger.info("✅ 已启动预加载后台任务，接口立即返回success=true")
+
+        return {"success": True, "message": "预加载已启动"}
+
+    except Exception as e:
+        logger.error(f"❌ 模型预加载异常: {str(e)}", exc_info=True)
+        return {"success": False, "message": f"启动预加载失败: {str(e)}"}
+
+@app.post("/api/models/cache/clear")
+async def clear_models_cache():
+    """清空模型缓存"""
+    try:
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        
+        if model_manager:
+            model_manager.clear_cache()
+            logger.info("手动清空模型缓存成功")
+            return {
+                "success": True,
+                "message": "模型缓存已清空"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "模型管理器未初始化"
+            }
+            
+    except Exception as e:
+        logger.error(f"清空模型缓存失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"清空缓存失败: {str(e)}"
+        }
+
+@app.post("/api/models/preload/reset")
+async def reset_preload_attempts():
+    """重置预加载失败计数"""
+    try:
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        
+        if model_manager:
+            model_manager.reset_preload_attempts()
+            logger.info("手动重置预加载失败计数成功")
+            return {
+                "success": True,
+                "message": "预加载失败计数已重置"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "模型管理器未初始化"
+            }
+            
+    except Exception as e:
+        logger.error(f"重置预加载失败计数失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"重置失败: {str(e)}"
+        }
+
+@app.post("/api/shutdown")
+async def shutdown_server():
+    """优雅关闭服务器"""
+    try:
+        logger.info("收到关闭服务器请求")
+        
+        # 清理资源
+        from processor import get_model_manager
+        model_manager = get_model_manager()
+        if model_manager:
+            model_manager.clear_cache()
+            logger.info("已清理模型缓存")
+        
+        # 返回成功响应
+        response = {
+            "success": True,
+            "message": "服务器正在优雅关闭"
+        }
+        
+        # 异步关闭服务器
+        import asyncio
+        import os
+        asyncio.create_task(delayed_shutdown())
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"关闭服务器失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"关闭服务器失败: {str(e)}"
+        }
+
+async def delayed_shutdown():
+    """延迟关闭服务器，给响应时间返回"""
+    await asyncio.sleep(1)  # 等待1秒让响应返回
+    logger.info("服务器即将关闭...")
+    import os
+    os._exit(0)
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True, 
+    # 直接传入 app，关闭 reload，确保使用当前文件内定义的应用实例
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False,
                 limit_max_requests=1000, limit_concurrency=50)
