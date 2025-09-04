@@ -189,11 +189,25 @@ async function loadFiles() {
     availableFiles.value = data.files || []
     inputDirPath.value = data.input_dir || 'input/'
     if (availableFiles.value.length === 0) {
-      ElMessage.info('input 目录中没有找到支持的媒体文件')
+      // 延迟一点时间确保组件完全初始化
+      setTimeout(() => {
+        try {
+          ElMessage.info('input 目录中没有找到支持的媒体文件')
+        } catch (error) {
+          console.log('ElMessage 调用失败:', error)
+        }
+      }, 100)
     }
   } catch (error) {
     console.error('获取文件列表失败:', error)
-    ElMessage.error('获取文件列表失败：' + (error.response?.data?.detail || error.message))
+    // 延迟一点时间确保组件完全初始化
+    setTimeout(() => {
+      try {
+        ElMessage.error('获取文件列表失败：' + (error.response?.data?.detail || error.message))
+      } catch (msgError) {
+        console.log('ElMessage 调用失败:', msgError)
+      }
+    }, 100)
   } finally {
     loadingFiles.value = false
   }
@@ -475,9 +489,13 @@ async function startInitialPreload() {
           const result = await preloadResponse.json()
           if (result.success) {
             console.log('[App] ✅ 模型预加载已启动')
+            // 使用 nextTick 确保组件完全初始化后再调用 ElMessage
+            await new Promise(resolve => setTimeout(resolve, 100))
             ElMessage.success('模型预加载已启动，可在右上角查看进度', { duration: 3000 })
           } else {
             console.log('[App] ⚠️ 预加载启动失败:', result.message)
+            // 使用 nextTick 确保组件完全初始化后再调用 ElMessage
+            await new Promise(resolve => setTimeout(resolve, 100))
             ElMessage.info('模型将在首次使用时自动加载', { duration: 2000 })
           }
         } else {
@@ -485,7 +503,13 @@ async function startInitialPreload() {
         }
       } catch (error) {
         console.log('[App] ❌ 自动预加载异常:', error.message)
-        ElMessage.info('模型将在首次使用时自动加载', { duration: 2000 })
+        // 使用 nextTick 确保组件完全初始化后再调用 ElMessage
+        try {
+          await new Promise(resolve => setTimeout(resolve, 100))
+          ElMessage.info('模型将在首次使用时自动加载', { duration: 2000 })
+        } catch (msgError) {
+          console.log('[App] ElMessage 调用失败:', msgError)
+        }
       }
     }, 10000) // 延迟10秒
   } catch (error) {

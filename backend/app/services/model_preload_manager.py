@@ -8,6 +8,7 @@ import gc
 import logging
 import threading
 import time
+import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
@@ -47,22 +48,27 @@ class PreloadConfig:
 
 
 class ModelPreloadManager:
-    """模型预加载和缓存管理器"""
+    """简化版模型预加载和缓存管理器 - 方案二实现
+    
+    核心改进:
+    1. 统一锁机制避免死锁
+    2. 幂等性预加载避免重复执行
+    3. 缓存版本号确保状态同步
+    4. 标准化日志便于调试
+    """
     
     def __init__(self, config: PreloadConfig = None):
         self.config = config or PreloadConfig()
-        self.logger = logging.getLogger(__name__)
+        self.logger = self._setup_logger()
         
         # 模型缓存 (LRU)
         self._whisper_cache: OrderedDict[Tuple[str, str, str], ModelCacheInfo] = OrderedDict()
         self._align_cache: OrderedDict[str, Tuple[Any, Any, float]] = OrderedDict()
         
-        # 线程锁
-        self._whisper_lock = threading.Lock()
-        self._align_lock = threading.Lock()
-        self._preload_lock = threading.Lock()
+        # 统一锁 - 简化并发控制，避免多锁死锁
+        self._global_lock = threading.RLock()
         
-        # 预加载状态
+        # 简化的预加载状态 - 单一数据源
         self._preload_status = {
             "is_preloading": False,
             "progress": 0.0,
@@ -73,19 +79,41 @@ class ModelPreloadManager:
             "failed_attempts": 0,
             "last_attempt_time": 0,
             "max_retry_attempts": 3,
-            "retry_cooldown": 30  # 30秒冷却期
+            "retry_cooldown": 30,
+            "cache_version": int(time.time())  # 缓存版本号，用于状态同步
         }
+        
+        # 预加载任务管理 - 实现幂等性
+        self._preload_promise: Optional[asyncio.Task] = None
         
         # 内存监控
         self._memory_monitor = MemoryMonitor()
         
+        self.logger.info("🏗️ ModelPreloadManager初始化完成 - 简化架构")
+    
+    def _setup_logger(self) -> logging.Logger:
+        """设置标准化的日志记录器"""
+        logger = logging.getLogger(f"{__name__}.ModelPreloadManager")
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - 🤖[模型管理] - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+        return logger
+        
     def get_preload_status(self) -> Dict[str, Any]:
-        """获取预加载状态"""
-        return self._preload_status.copy()
+        """获取预加载状态 - 线程安全版本"""
+        with self._global_lock:
+            status = self._preload_status.copy()
+            self.logger.debug(f"📊 状态查询: 预加载={status['is_preloading']}, 进度={status['progress']:.1f}%, 已加载={status['loaded_models']}")
+            return status
     
     def get_cache_status(self) -> Dict[str, Any]:
-        """获取缓存状态"""
-        with self._whisper_lock:
+        """获取缓存状态 - 线程安全版本"""
+        with self._global_lock:
             whisper_models = [
                 {
                     "key": info.key,
@@ -95,213 +123,229 @@ class ModelPreloadManager:
                 }
                 for info in self._whisper_cache.values()
             ]
-        
-        with self._align_lock:
+            
             align_models = list(self._align_cache.keys())
-        
-        return {
-            "whisper_models": whisper_models,
-            "align_models": align_models,
-            "total_memory_mb": sum(info.memory_size for info in self._whisper_cache.values()),
-            "max_cache_size": self.config.max_cache_size,
-            "memory_info": self._memory_monitor.get_memory_info()
-        }
+            total_memory = sum(info.memory_size for info in self._whisper_cache.values())
+            
+            cache_status = {
+                "whisper_models": whisper_models,
+                "align_models": align_models,
+                "total_memory_mb": total_memory,
+                "max_cache_size": self.config.max_cache_size,
+                "memory_info": self._memory_monitor.get_memory_info(),
+                "cache_version": self._preload_status["cache_version"]
+            }
+            
+            self.logger.debug(f"💾 缓存查询: Whisper模型={len(whisper_models)}个, 对齐模型={len(align_models)}个, 内存={total_memory}MB")
+            return cache_status
     
     async def preload_models(self, progress_callback=None) -> Dict[str, Any]:
-        """预加载默认模型"""
-        self.logger.info("=== 模型预加载任务开始 ===")
-        
-        if not self.config.enabled:
-            self.logger.warning("模型预加载功能已禁用")
-            return {"success": False, "message": "预加载功能已禁用"}
+        """预加载默认模型 - 简化版实现，带幂等性保证"""
+        with self._global_lock:
+            # 检查是否已经在预加载中（幂等性检查）
+            if self._preload_status["is_preloading"]:
+                self.logger.info("⚡ 预加载已在进行中，返回已有任务")
+                return {"success": True, "message": "预加载已在进行中"}
+            
+            if not self.config.enabled:
+                self.logger.warning("⚠️ 模型预加载功能已禁用")
+                return {"success": False, "message": "预加载功能已禁用"}
 
-        # 由于API层面已经设置了is_preloading=True，这里不再重复检查冷却期
-        # 直接开始预加载流程
-        
-        # 获取当前时间并重置状态（除了is_preloading，它已经在API层设置为True）
-        current_time = time.time()
-        self._preload_status.update({
-            # "is_preloading": True,  # API层已设置，这里不再重复设置
-            "progress": 0.0,
-            "current_model": "",
-            "total_models": len(self.config.default_models),
-            "loaded_models": 0,
-            "errors": [],
-            "last_attempt_time": current_time
-        })
-        
-        self.logger.info(f"预加载配置: 模型={self.config.default_models}, 最大缓存={self.config.max_cache_size}, 预热={self.config.warmup_enabled}")
-        
+            # 设置预加载状态
+            self._preload_status.update({
+                "is_preloading": True,
+                "progress": 0.0,
+                "current_model": "",
+                "total_models": len(self.config.default_models),
+                "loaded_models": 0,
+                "errors": [],
+                "last_attempt_time": time.time()
+            })
+            
+            self.logger.info(f"🚀 开始预加载任务: {self.config.default_models}")
+
         try:
+            success_count = 0
+            total_models = len(self.config.default_models)
+            
             for i, model_name in enumerate(self.config.default_models):
                 try:
-                    self.logger.info(f"[预加载] 开始处理模型 {i+1}/{len(self.config.default_models)}: {model_name}")
+                    # 更新当前进度
+                    with self._global_lock:
+                        self._preload_status.update({
+                            "current_model": model_name,
+                            "progress": (i / total_models) * 100
+                        })
+                    
+                    self.logger.info(f"🔄 [{i+1}/{total_models}] 处理模型: {model_name}")
                     
                     # 检查内存
-                    memory_info = self._memory_monitor.get_memory_info()
-                    self.logger.info(f"[预加载] 当前内存使用: 系统 {memory_info.get('system_memory_percent', 0):.1f}%")
-                    
                     if not self._memory_monitor.check_memory_available():
-                        error_msg = f"内存不足，跳过模型 {model_name} (系统内存使用: {memory_info.get('system_memory_percent', 0):.1f}%)"
-                        self.logger.warning(f"[预加载] {error_msg}")
-                        self._preload_status["errors"].append(error_msg)
+                        error_msg = f"内存不足，跳过模型 {model_name}"
+                        self.logger.warning(f"⚠️ {error_msg}")
+                        with self._global_lock:
+                            self._preload_status["errors"].append(error_msg)
                         continue
-                    
-                    # 更新状态
-                    self._preload_status.update({
-                        "current_model": model_name,
-                        "progress": (i / len(self.config.default_models)) * 100
-                    })
-                    
-                    self.logger.info(f"[预加载] 进度更新: {self._preload_status['progress']:.1f}%")
-                    
-                    if progress_callback:
-                        progress_callback(self._preload_status.copy())
                     
                     # 检查模型是否已缓存
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                     key = (model_name, "float16", device)
                     
-                    with self._whisper_lock:
+                    with self._global_lock:
                         if key in self._whisper_cache:
-                            self.logger.info(f"[预加载] 模型 {model_name} 已在缓存中，跳过加载")
+                            self.logger.info(f"✅ 模型 {model_name} 已在缓存中")
                             self._preload_status["loaded_models"] += 1
+                            success_count += 1
                             continue
                     
-                    # 预加载模型
+                    # 加载新模型
                     settings = JobSettings(
                         model=model_name,
                         compute_type="float16",
                         device=device
                     )
                     
-                    self.logger.info(f"[预加载] 开始加载模型: model={model_name}, device={device}, compute_type=float16")
-                    
+                    self.logger.info(f"🔍 开始加载模型: {model_name} (device={device})")
                     start_time = time.time()
+                    
                     model = self._load_whisper_model(settings)
+                    
                     load_time = time.time() - start_time
                     
                     # 预热模型
                     if self.config.warmup_enabled:
-                        self.logger.info(f"[预加载] 开始预热模型 {model_name}")
-                        warmup_start = time.time()
+                        self.logger.info(f"🔥 预热模型: {model_name}")
                         self._warmup_model(model)
-                        warmup_time = time.time() - warmup_start
-                        self.logger.info(f"[预加载] 模型 {model_name} 预热完成 (耗时: {warmup_time:.2f}s)")
                     
-                    self._preload_status["loaded_models"] += 1
+                    with self._global_lock:
+                        self._preload_status["loaded_models"] += 1
+                    success_count += 1
                     
-                    self.logger.info(f"[预加载] ✓ 成功预加载模型 {model_name} (总耗时: {load_time:.2f}s)")
+                    self.logger.info(f"✅ 模型 {model_name} 加载成功 (耗时: {load_time:.2f}s)")
+                    
+                    # 调用进度回调
+                    if progress_callback:
+                        with self._global_lock:
+                            progress_callback(self._preload_status.copy())
                     
                 except Exception as e:
-                    error_msg = f"预加载模型 {model_name} 失败: {str(e)}"
-                    self.logger.error(f"[预加载] {error_msg}", exc_info=True)
-                    self._preload_status["errors"].append(error_msg)
+                    error_msg = f"加载模型 {model_name} 失败: {str(e)}"
+                    self.logger.error(f"❌ {error_msg}", exc_info=True)
+                    with self._global_lock:
+                        self._preload_status["errors"].append(error_msg)
             
             # 完成预加载
-            success = self._preload_status["loaded_models"] > 0
+            success = success_count > 0
             
-            # 更新失败计数
-            if not success:
-                self._preload_status["failed_attempts"] += 1
-            else:
-                # 成功则重置失败计数
-                self._preload_status["failed_attempts"] = 0
+            with self._global_lock:
+                # 更新失败计数
+                if not success:
+                    self._preload_status["failed_attempts"] += 1
+                else:
+                    self._preload_status["failed_attempts"] = 0  # 成功后重置
                 
-            self._preload_status.update({
-                "is_preloading": False,
-                "progress": 100.0,
-                "current_model": ""
-            })
+                # 更新缓存版本号
+                self._preload_status["cache_version"] = int(time.time())
+                
+                # 结束预加载状态
+                self._preload_status.update({
+                    "is_preloading": False,
+                    "progress": 100.0,
+                    "current_model": ""
+                })
+                
+                result = {
+                    "success": success,
+                    "loaded_models": self._preload_status["loaded_models"],
+                    "total_models": self._preload_status["total_models"],
+                    "errors": self._preload_status["errors"].copy(),
+                    "failed_attempts": self._preload_status["failed_attempts"],
+                    "cache_version": self._preload_status["cache_version"]
+                }
             
-            result = {
-                "success": success,
-                "loaded_models": self._preload_status["loaded_models"],
-                "total_models": self._preload_status["total_models"],
-                "errors": self._preload_status["errors"],
-                "failed_attempts": self._preload_status["failed_attempts"],
-                "cache_status": self.get_cache_status()
-            }
+            # 日志输出
+            if success:
+                self.logger.info(f"✅ 预加载任务成功完成: {success_count}/{total_models} 个模型")
+            else:
+                self.logger.warning(f"⚠️ 预加载任务完成但无成功加载的模型")
+                
+            if result["errors"]:
+                self.logger.warning(f"⚠️ 预加载过程中出现 {len(result['errors'])} 个错误")
             
+            # 调用最终进度回调
             if progress_callback:
                 progress_callback(self._preload_status.copy())
-            
-            # 详细的完成日志
-            if success:
-                self.logger.info(f"=== 模型预加载任务成功完成 ===")
-                self.logger.info(f"成功加载: {result['loaded_models']}/{result['total_models']} 个模型")
-                cache_status = self.get_cache_status()
-                self.logger.info(f"当前缓存: {len(cache_status['whisper_models'])} 个Whisper模型, {cache_status['total_memory_mb']}MB")
-            else:
-                self.logger.warning(f"=== 模型预加载任务完成但无成功加载的模型 ===")
-                self.logger.warning(f"失败尝试次数: {result['failed_attempts']}/{self._preload_status['max_retry_attempts']}")
-                if result['failed_attempts'] >= self._preload_status['max_retry_attempts']:
-                    self.logger.error("预加载失败次数过多，已暂停预加载功能。请检查系统状态后手动重试。")
-                
-            if result['errors']:
-                self.logger.warning(f"预加载过程中出现 {len(result['errors'])} 个错误")
-                for error in result['errors']:
-                    self.logger.warning(f"预加载错误: {error}")
             
             return result
             
         except Exception as e:
-            self._preload_status["is_preloading"] = False
-            self._preload_status["failed_attempts"] += 1
-            self.logger.error(f"预加载过程异常: {str(e)}", exc_info=True)
-            return {"success": False, "message": f"预加载失败: {str(e)}", "failed_attempts": self._preload_status["failed_attempts"]}
+            with self._global_lock:
+                self._preload_status["is_preloading"] = False
+                self._preload_status["failed_attempts"] += 1
+            
+            self.logger.error(f"❌ 预加载过程异常: {str(e)}", exc_info=True)
+            return {
+                "success": False, 
+                "message": f"预加载失败: {str(e)}", 
+                "failed_attempts": self._preload_status["failed_attempts"]
+            }
 
     def reset_preload_attempts(self):
-        """重置预加载失败计数"""
-        self._preload_status["failed_attempts"] = 0
-        self._preload_status["last_attempt_time"] = 0
-        self.logger.info("预加载失败计数已重置")
+        """重置预加载失败计数 - 线程安全版本"""
+        with self._global_lock:
+            old_attempts = self._preload_status["failed_attempts"]
+            self._preload_status["failed_attempts"] = 0
+            self._preload_status["last_attempt_time"] = 0
+            self._preload_status["cache_version"] = int(time.time())
+            
+        self.logger.info(f"🔄 预加载失败计数已重置: {old_attempts} -> 0")
     
     def get_model(self, settings: JobSettings):
-        """获取Whisper模型 (带LRU缓存)"""
+        """获取Whisper模型 (带LRU缓存) - 简化版本"""
         key = (settings.model, settings.compute_type, settings.device)
         
-        with self._whisper_lock:
+        with self._global_lock:
             # 命中缓存
             if key in self._whisper_cache:
                 info = self._whisper_cache[key]
                 info.last_used = time.time()
                 # 移到最后 (最近使用)
                 self._whisper_cache.move_to_end(key)
-                self.logger.debug(f"[转录任务] 命中Whisper模型缓存: {key}")
+                self.logger.debug(f"✅ 命中模型缓存: {key}")
                 return info.model
             
             # 缓存未命中，加载新模型
-            self.logger.info(f"[转录任务] 需要加载新的Whisper模型: {key}")
+            self.logger.info(f"🔄 需要加载新模型: {key}")
             return self._load_whisper_model(settings)
     
     def _load_whisper_model(self, settings: JobSettings):
-        """加载Whisper模型"""
+        """加载Whisper模型 - 简化版本带并发保护"""
         key = (settings.model, settings.compute_type, settings.device)
         
         # 再次检查缓存（避免并发加载同一模型）
-        with self._whisper_lock:
+        with self._global_lock:
             if key in self._whisper_cache:
                 info = self._whisper_cache[key]
                 info.last_used = time.time()
                 self._whisper_cache.move_to_end(key)
-                self.logger.debug(f"并发检查命中缓存，避免重复加载: {key}")
+                self.logger.debug(f"⚡ 并发检查命中缓存，避免重复加载: {key}")
                 return info.model
         
-        self.logger.info(f"开始加载新的Whisper模型: {key}")
+        self.logger.info(f"🔍 开始加载新Whisper模型: {key}")
         
         # 检查内存
         if not self._memory_monitor.check_memory_available():
-            self.logger.warning("内存不足，尝试清理缓存")
+            self.logger.warning("⚠️ 内存不足，尝试清理缓存")
             self._cleanup_old_models()
         
         # 检查缓存大小
-        if len(self._whisper_cache) >= self.config.max_cache_size:
-            self._evict_lru_model()
+        with self._global_lock:
+            if len(self._whisper_cache) >= self.config.max_cache_size:
+                self._evict_lru_model()
         
         try:
             start_time = time.time()
-            self.logger.info(f"正在从磁盘加载模型 {settings.model} (device={settings.device}, compute_type={settings.compute_type})")
+            self.logger.info(f"🚀 正在从磁盘加载模型 {settings.model} (device={settings.device}, compute_type={settings.compute_type})")
             
             model = whisperx.load_model(
                 settings.model, 
@@ -322,30 +366,32 @@ class ModelPreloadManager:
                 memory_size=memory_size
             )
             
-            with self._whisper_lock:
+            with self._global_lock:
                 self._whisper_cache[key] = info
+                # 更新缓存版本号
+                self._preload_status["cache_version"] = int(time.time())
             
-            self.logger.info(f"✓ 成功加载并缓存Whisper模型 {key} (内存: {memory_size}MB, 耗时: {load_time:.2f}s)")
+            self.logger.info(f"✅ 成功加载并缓存Whisper模型 {key} (内存: {memory_size}MB, 耗时: {load_time:.2f}s)")
             return model
             
         except Exception as e:
-            self.logger.error(f"✗ 加载Whisper模型失败 {key}: {str(e)}", exc_info=True)
+            self.logger.error(f"❌ 加载Whisper模型失败 {key}: {str(e)}", exc_info=True)
             raise
     
     def get_align_model(self, lang: str, device: str):
-        """获取对齐模型 (带LRU缓存)"""
-        with self._align_lock:
+        """获取对齐模型 (带LRU缓存) - 简化版本"""
+        with self._global_lock:
             # 命中缓存
             if lang in self._align_cache:
                 model, meta, last_used = self._align_cache[lang]
                 # 更新使用时间并移到最后
                 self._align_cache[lang] = (model, meta, time.time())
                 self._align_cache.move_to_end(lang)
-                self.logger.debug(f"命中对齐模型缓存: {lang}")
+                self.logger.debug(f"✅ 命中对齐模型缓存: {lang}")
                 return model, meta
             
             # 缓存未命中，加载新模型
-            self.logger.info(f"加载新的对齐模型: {lang}")
+            self.logger.info(f"🔄 加载新对齐模型: {lang}")
             try:
                 model, meta = whisperx.load_align_model(language_code=lang, device=device)
                 
@@ -354,14 +400,18 @@ class ModelPreloadManager:
                     # 移除最旧的
                     oldest = next(iter(self._align_cache))
                     del self._align_cache[oldest]
+                    self.logger.debug(f"🗑️ 移除最旧对齐模型: {oldest}")
                 
                 self._align_cache[lang] = (model, meta, time.time())
                 
-                self.logger.info(f"成功加载对齐模型: {lang}")
+                # 更新缓存版本号
+                self._preload_status["cache_version"] = int(time.time())
+                
+                self.logger.info(f"✅ 成功加载对齐模型: {lang}")
                 return model, meta
                 
             except Exception as e:
-                self.logger.error(f"加载对齐模型失败 {lang}: {str(e)}", exc_info=True)
+                self.logger.error(f"❌ 加载对齐模型失败 {lang}: {str(e)}", exc_info=True)
                 raise
     
     def _warmup_model(self, model):
@@ -382,7 +432,7 @@ class ModelPreloadManager:
             self.logger.warning(f"模型预热失败: {str(e)}")
     
     def _evict_lru_model(self):
-        """驱逐最久未使用的模型"""
+        """驱逐最久未使用的模型 - 需要在锁内调用"""
         if not self._whisper_cache:
             return
         
@@ -390,7 +440,7 @@ class ModelPreloadManager:
         oldest_key = next(iter(self._whisper_cache))
         info = self._whisper_cache.pop(oldest_key)
         
-        self.logger.info(f"驱逐LRU模型: {oldest_key}, 释放内存: {info.memory_size}MB")
+        self.logger.info(f"🗑️ 驱逐LRU模型: {oldest_key}, 释放内存: {info.memory_size}MB")
         
         # 释放内存
         del info.model
@@ -401,25 +451,27 @@ class ModelPreloadManager:
             torch.cuda.empty_cache()
     
     def _cleanup_old_models(self):
-        """清理旧模型释放内存"""
+        """清理旧模型释放内存 - 需要在锁外调用"""
         current_time = time.time()
         to_remove = []
         
-        for key, info in self._whisper_cache.items():
-            # 超过10分钟未使用的模型
-            if current_time - info.last_used > 600:
-                to_remove.append(key)
-        
-        for key in to_remove:
-            info = self._whisper_cache.pop(key)
-            self.logger.info(f"清理旧模型: {key}")
-            del info.model
-            del info
+        with self._global_lock:
+            for key, info in self._whisper_cache.items():
+                # 超过10分钟未使用的模型
+                if current_time - info.last_used > 600:
+                    to_remove.append(key)
+            
+            for key in to_remove:
+                info = self._whisper_cache.pop(key)
+                self.logger.info(f"🗑️ 清理旧模型: {key}")
+                del info.model
+                del info
         
         if to_remove:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            self.logger.info(f"💫 清理了 {len(to_remove)} 个旧模型")
     
     def _estimate_model_memory(self, model) -> int:
         """估算模型内存使用 (MB)"""
@@ -438,20 +490,37 @@ class ModelPreloadManager:
         return 500  # 默认500MB
     
     def clear_cache(self):
-        """清空所有缓存"""
-        with self._whisper_lock:
+        """清空所有缓存 - 简化版本，立即同步状态"""
+        with self._global_lock:
+            # 记录清理前的缓存状态
+            whisper_count = len(self._whisper_cache)
+            align_count = len(self._align_cache)
+            total_memory = sum(info.memory_size for info in self._whisper_cache.values())
+            
+            # 清理Whisper模型缓存
             for info in self._whisper_cache.values():
                 del info.model
             self._whisper_cache.clear()
-        
-        with self._align_lock:
+            
+            # 清理对齐模型缓存
             self._align_cache.clear()
-        
+            
+            # 立即更新预加载状态 - 解决状态同步问题
+            self._preload_status.update({
+                "loaded_models": 0,
+                "is_preloading": False,
+                "progress": 0.0,
+                "current_model": "",
+                "errors": [],
+                "cache_version": int(time.time())  # 更新缓存版本号
+            })
+            
+        # 垃圾回收和GPU内存清理
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        self.logger.info("已清空所有模型缓存")
+        self.logger.info(f"🗑️ 已清空所有模型缓存: Whisper={whisper_count}个, 对齐={align_count}个, 释放内存={total_memory}MB")
 
 
 class MemoryMonitor:

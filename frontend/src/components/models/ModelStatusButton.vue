@@ -245,7 +245,7 @@ import { modelAPI } from "../../services/api.js";
 
 const showDialog = ref(false);
 
-// 模型状态数据
+// 简化的模型状态数据
 const modelStatus = reactive({
   is_preloading: false,
   progress: 0,
@@ -255,6 +255,7 @@ const modelStatus = reactive({
   errors: [],
   failed_attempts: 0,
   max_retry_attempts: 3,
+  cache_version: 0  // 缓存版本号，用于检测状态变更
 });
 
 const cacheStatus = reactive({
@@ -263,10 +264,12 @@ const cacheStatus = reactive({
   total_memory_mb: 0,
   max_cache_size: 0,
   memory_info: {},
+  cache_version: 0  // 缓存版本号
 });
 
-const updateTimer = ref(null);
-const highFrequencyTimer = ref(null);
+// 单一自适应定时器
+let pollTimer = null;
+let lastCacheVersion = 0;  // 用于检测缓存状态变更
 
 // 计算属性
 const isPreloadBlocked = computed(() => {
@@ -326,6 +329,47 @@ const statusIcon = computed(() => {
   return "Loading";
 });
 
+// 简化的自适应轮询机制
+function getAdaptiveInterval() {
+  if (modelStatus.is_preloading) {
+    return 1500;  // 预加载时频繁更新
+  }
+  if (modelStatus.loaded_models > 0) {
+    return 15000; // 已加载模型时低频更新
+  }
+  return 5000;    // 默认中频更新
+}
+
+function startAdaptivePolling() {
+  console.log("🔄 启动自适应轮询机制");
+  
+  const poll = async () => {
+    try {
+      await updateModelStatus();
+      
+      // 自适应调整轮询间隔
+      const nextInterval = getAdaptiveInterval();
+      pollTimer = setTimeout(poll, nextInterval);
+      
+    } catch (error) {
+      console.error("❌ 轮询更新失败:", error);
+      // 失败后稍后重试
+      pollTimer = setTimeout(poll, 8000);
+    }
+  };
+  
+  // 立即执行一次，然后开始轮询
+  poll();
+}
+
+function stopAdaptivePolling() {
+  if (pollTimer) {
+    console.log("⏹️ 停止自适应轮询");
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+  
 // 对话框处理函数，防止布局偏移
 function openDialog() {
   // 记录当前滚动条宽度
@@ -402,56 +446,52 @@ watch(showDialog, (newVal) => {
   }
 });
 
-// 方法
+// 简化的状态更新方法 - 单一数据源
 async function updateModelStatus() {
   try {
-    console.log("🔄 开始更新模型状态...");
+    console.log("🔄 更新模型状态");
 
     const [preloadRes, cacheRes] = await Promise.all([
       modelAPI.getPreloadStatus(),
       modelAPI.getCacheStatus(),
     ]);
 
+    let statusChanged = false;
+    
     if (preloadRes.success) {
       const newStatus = preloadRes.data;
-      console.log("📡 服务器状态:", {
-        is_preloading: newStatus.is_preloading,
-        progress: newStatus.progress,
-        loaded_models: newStatus.loaded_models,
-        current_model: newStatus.current_model,
-      });
-
-      // 检测状态变化
+      
+      // 检测关键状态变化
       const wasPreloading = modelStatus.is_preloading;
       const isNowPreloading = newStatus.is_preloading;
-
-      // 直接更新本地状态
+      const progressChanged = Math.abs(newStatus.progress - modelStatus.progress) > 1;
+      
+      // 更新状态
       Object.assign(modelStatus, newStatus);
-
+      
       // 状态变化日志
       if (wasPreloading !== isNowPreloading) {
-        if (isNowPreloading) {
-          console.log("🚀 预加载已开始");
-          stopRegularUpdates();
-          startHighFrequencyUpdates();
-        } else {
-          console.log("✅ 预加载已完成");
-          stopHighFrequencyUpdates();
-          startRegularUpdates();
-        }
+        console.log(isNowPreloading ? "🚀 预加载开始" : "✅ 预加载完成");
+        statusChanged = true;
+      } else if (isNowPreloading && progressChanged) {
+        console.log(`📊 预加载进度: ${Math.round(newStatus.progress)}%`);
       }
-
-      console.log("✅ 本地状态已更新");
     } else {
       console.warn("⚠️ 获取预加载状态失败:", preloadRes.message);
     }
 
     if (cacheRes.success) {
+      // 检测缓存版本变化
+      if (cacheRes.data.cache_version !== lastCacheVersion) {
+        console.log("💾 缓存状态已更新");
+        lastCacheVersion = cacheRes.data.cache_version;
+        statusChanged = true;
+      }
       Object.assign(cacheStatus, cacheRes.data);
-      console.log("💾 缓存状态已更新");
     } else {
       console.warn("⚠️ 获取缓存状态失败:", cacheRes.message);
     }
+    
   } catch (error) {
     console.error("❌ 更新模型状态失败:", error);
   }
@@ -597,72 +637,11 @@ async function resetPreloadAttempts() {
   }
 }
 
-// 高频率状态更新 - 用于预加载期间
-function startHighFrequencyUpdates() {
-  console.log("启动高频率状态更新");
-  stopHighFrequencyUpdates(); // 先停止之前的更新
-
-  let updateCount = 0;
-  const maxUpdates = 90; // 最多更新90次（1.5分钟）
-
-  highFrequencyTimer.value = setInterval(async () => {
-    updateCount++;
-    console.log(`高频更新 #${updateCount}`);
-
-    await updateModelStatus();
-
-    // 检查是否完成
-    if (!modelStatus.is_preloading && modelStatus.loaded_models > 0) {
-      console.log("预加载完成，停止高频更新");
-      stopHighFrequencyUpdates();
-      ElMessage.success(
-        `模型预加载完成！已加载 ${modelStatus.loaded_models} 个模型`
-      );
-      return;
-    }
-
-    // 达到最大次数停止
-    if (updateCount >= maxUpdates) {
-      console.log("高频更新达到最大次数，切换到常规更新");
-      stopHighFrequencyUpdates();
-      startRegularUpdates();
-    }
-  }, 1000); // 每秒更新
-}
-
-function stopHighFrequencyUpdates() {
-  if (highFrequencyTimer.value) {
-    console.log("停止高频率状态更新");
-    clearInterval(highFrequencyTimer.value);
-    highFrequencyTimer.value = null;
-  }
-}
-
-function startRegularUpdates() {
-  console.log("启动常规状态更新");
-  stopRegularUpdates(); // 先停止之前的更新
-
-  const updateInterval = () => {
-    if (modelStatus.is_preloading) return 3000; // 预加载时3秒
-    if (modelStatus.loaded_models > 0) return 15000; // 已加载时15秒
-    return 8000; // 其他情况8秒
-  };
-
-  const scheduleNext = () => {
-    updateTimer.value = setTimeout(async () => {
-      await updateModelStatus();
-      scheduleNext(); // 递归调度
-    }, updateInterval());
-  };
-
-  scheduleNext();
-}
-
-function stopRegularUpdates() {
-  if (updateTimer.value) {
-    clearTimeout(updateTimer.value);
-    updateTimer.value = null;
-  }
+// 手动强制更新状态
+async function forceUpdate() {
+  console.log("🔄 手动触发状态更新");
+  await updateModelStatus();
+  ElMessage.info("状态已刷新");
 }
 
 function getMemoryColor(percent) {
@@ -693,65 +672,19 @@ function getStatusIndicatorText() {
   return "加载中";
 }
 
-// 手动强制更新状态
-async function forceUpdate() {
-  console.log("手动触发状态更新");
-  await updateModelStatus();
-  ElMessage.info("状态已刷新");
-}
-
-// 调试函数：模拟预加载状态变化
-function simulatePreloading() {
-  console.log("模拟预加载开始");
-  modelStatus.is_preloading = true;
-  modelStatus.progress = 0;
-  modelStatus.current_model = "模拟加载中...";
-
-  // 模拟进度更新
-  let progress = 0;
-  const interval = setInterval(() => {
-    progress += 10;
-    modelStatus.progress = progress;
-
-    if (progress >= 100) {
-      clearInterval(interval);
-      modelStatus.is_preloading = false;
-      modelStatus.loaded_models = 3;
-      modelStatus.current_model = "";
-      console.log("模拟预加载完成");
-    }
-  }, 1000);
-}
-
-function startStatusUpdates() {
-  console.log("启动初始状态更新");
-  // 立即更新一次状态
-  updateModelStatus().then(() => {
-    console.log("初始状态更新完成，开始常规更新");
-    startRegularUpdates();
-  });
-}
-
-// 生命周期
+// 简化的生命周期管理
 onMounted(() => {
-  console.log("🎬 ModelStatusButton 组件已挂载");
+  console.log("🎬 ModelStatusButton 组件已挂载 - 简化版本");
 
-  // 添加响应式监听
+  // 简化的响应式监听 - 只监听关键状态变化
   watch(
     () => modelStatus.is_preloading,
     (newVal, oldVal) => {
       if (newVal !== oldVal) {
-        console.log(`预加载状态变化: ${oldVal} -> ${newVal}`);
-        console.log(`按钮状态: ${statusType.value}, 文本: ${statusText.value}`);
-      }
-    }
-  );
-
-  watch(
-    () => modelStatus.progress,
-    (newVal, oldVal) => {
-      if (modelStatus.is_preloading && Math.abs(newVal - oldVal) > 5) {
-        console.log(`预加载进度: ${oldVal}% -> ${newVal}%`);
+        console.log(`🔄 预加载状态变化: ${oldVal} -> ${newVal}`);
+        if (newVal && modelStatus.loaded_models > 0) {
+          ElMessage.success(`模型预加载完成！已加载 ${modelStatus.loaded_models} 个模型`);
+        }
       }
     }
   );
@@ -759,23 +692,24 @@ onMounted(() => {
   watch(
     () => modelStatus.loaded_models,
     (newVal, oldVal) => {
-      if (newVal !== oldVal) {
-        console.log(`已加载模型数量变化: ${oldVal} -> ${newVal}`);
+      if (newVal !== oldVal && newVal > oldVal) {
+        console.log(`📊 已加载模型数量更新: ${oldVal} -> ${newVal}`);
       }
     }
   );
 
-  // 启动状态更新
-  console.log("启动初始状态检查");
-  startStatusUpdates();
+  // 启动自适应轮询
+  console.log("🚀 启动初始状态检查");
+  startAdaptivePolling();
 });
 
 onUnmounted(() => {
-  console.log("🔚 ModelStatusButton 组件卸载，清理定时器");
-  stopRegularUpdates();
-  stopHighFrequencyUpdates();
+  console.log("🔚 ModelStatusButton 组件卸载 - 清理资源");
   
-  // 清理observer
+  // 清理轮询定时器
+  stopAdaptivePolling();
+  
+  // 清理对话框observer
   if (document.body._modalObserver) {
     document.body._modalObserver.disconnect();
     delete document.body._modalObserver;
