@@ -86,13 +86,6 @@ preload_config = ModelPreloadConfig.get_preload_config()
 # 打印配置信息
 ModelPreloadConfig.print_config()
 
-# 全局预加载状态 - True表示可以开始新的预加载，False表示正在预加载中
-preload_available = True
-
-# 异步后台任务与惰性锁，避免接口阻塞事件循环
-preload_task = None  # type: ignore
-preload_task_lock = None  # type: ignore
-
 class TranscribeSettings(BaseModel):
     model: str = "medium"
     compute_type: str = "float16"
@@ -480,8 +473,7 @@ async def get_models_cache_status():
 
 @app.post("/api/models/preload/start")
 async def start_models_preload():
-    """手动启动模型预加载（异步后台任务，立即返回）"""
-    global preload_task, preload_task_lock
+    """手动启动模型预加载 - 简化版本，实现真正的幂等性"""
     try:
         logger.info("🚀 收到模型预加载请求")
 
@@ -492,60 +484,24 @@ async def start_models_preload():
             logger.error("❌ 模型管理器未初始化")
             return {"success": False, "message": "模型管理器未初始化"}
 
-        # 冷却窗口检查
-        status = model_manager.get_preload_status()
-        if (
-            status.get("failed_attempts", 0) >= status.get("max_retry_attempts", 3)
-            and time.time() - status.get("last_attempt_time", 0) < status.get("retry_cooldown", 30)
-        ):
-            remaining_time = int(status.get("retry_cooldown", 30) - (time.time() - status.get("last_attempt_time", 0)))
-            msg = f"预加载失败次数过多，请等待 {remaining_time} 秒后重试"
-            logger.warning(f"⚠️ {msg}")
-            return {"success": False, "message": msg, "failed_attempts": status.get("failed_attempts", 0)}
-
-        # 惰性创建锁
-        if preload_task_lock is None:
-            preload_task_lock = asyncio.Lock()
-
-        # 幂等检查：若已在进行中，直接返回success=true
-        async with preload_task_lock:
-            if preload_task is not None and not preload_task.done():
-                logger.info("ℹ️ 预加载后台任务已在运行，直接返回成功")
-                return {"success": True, "message": "预加载已在进行中"}
-            if status.get("is_preloading", False):
-                logger.info("ℹ️ 管理器状态显示预加载中，直接返回成功")
-                return {"success": True, "message": "预加载已在进行中"}
-
-            # 立即将模型管理器状态设置为预加载中（保持前端"加载中"逻辑）
-            model_manager._preload_status["is_preloading"] = True
-            logger.info("🔄 已将预加载状态设为True，前端将立即显示加载中")
-
-            # 启动后台任务，不要 await，接口立即返回
-            def progress_callback(p):
-                try:
-                    logger.info(f"📊 预加载进度: {p.get('progress', 0):.1f}%, 当前模型: {p.get('current_model', '')}")
-                except Exception:
-                    pass
-
-            async def _run_preload():
-                try:
-                    logger.info("🏁 开始执行模型预加载后台任务")
-                    result = await preload_default_models(progress_callback)
-                    if result.get("success"):
-                        logger.info(f"✅ 模型预加载成功: {result.get('loaded_models', 0)}/{result.get('total_models', 0)}")
-                    else:
-                        logger.warning(f"⚠️ 模型预加载未成功: {result.get('message', 'Unknown error')}")
-                except Exception as e:
-                    logger.error(f"❌ 预加载后台任务异常: {e}", exc_info=True)
-                finally:
-                    global preload_task
-                    preload_task = None
-                    logger.info("🔚 预加载后台任务结束")
-
-            preload_task = asyncio.create_task(_run_preload())
-            logger.info("✅ 已启动预加载后台任务，接口立即返回success=true")
-
-        return {"success": True, "message": "预加载已启动"}
+        # 直接调用模型管理器的预加载方法 - 它已经实现了幂等性
+        result = await model_manager.preload_models()
+        
+        if result["success"]:
+            logger.info(f"✅ 模型预加载成功: {result.get('loaded_models', 0)}/{result.get('total_models', 0)} 个模型")
+            return {
+                "success": True,
+                "message": "预加载已启动",
+                "loaded_models": result.get("loaded_models", 0),
+                "total_models": result.get("total_models", 0)
+            }
+        else:
+            logger.warning(f"⚠️ 模型预加载未成功: {result.get('message', 'Unknown error')}")
+            return {
+                "success": False,
+                "message": result.get("message", "预加载失败"),
+                "failed_attempts": result.get("failed_attempts", 0)
+            }
 
     except Exception as e:
         logger.error(f"❌ 模型预加载异常: {str(e)}", exc_info=True)
@@ -553,17 +509,18 @@ async def start_models_preload():
 
 @app.post("/api/models/cache/clear")
 async def clear_models_cache():
-    """清空模型缓存"""
+    """清空模型缓存 - 简化版本，立即同步状态"""
     try:
         from processor import get_model_manager
         model_manager = get_model_manager()
         
         if model_manager:
             model_manager.clear_cache()
-            logger.info("手动清空模型缓存成功")
+            logger.info("✅ 手动清空模型缓存成功")
             return {
                 "success": True,
-                "message": "模型缓存已清空"
+                "message": "模型缓存已清空",
+                "cache_version": model_manager.get_preload_status().get("cache_version", 0)
             }
         else:
             return {
@@ -572,7 +529,7 @@ async def clear_models_cache():
             }
             
     except Exception as e:
-        logger.error(f"清空模型缓存失败: {str(e)}", exc_info=True)
+        logger.error(f"❌ 清空模型缓存失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"清空缓存失败: {str(e)}"
