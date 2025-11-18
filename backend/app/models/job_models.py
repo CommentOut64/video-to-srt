@@ -5,6 +5,9 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
 import torch
 
+# 导入CPU亲和性配置
+from services.cpu_affinity_service import CPUAffinityConfig
+
 
 @dataclass
 class JobSettings:
@@ -14,6 +17,7 @@ class JobSettings:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     batch_size: int = 16
     word_timestamps: bool = False
+    cpu_affinity: Optional[CPUAffinityConfig] = None
 
 
 @dataclass

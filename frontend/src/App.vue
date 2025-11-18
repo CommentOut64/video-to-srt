@@ -123,6 +123,11 @@ const settings = reactive({
   device: "cuda",
   batch_size: 16,
   word_timestamps: false,
+  // CPU亲和性配置
+  cpu_affinity_enabled: true,
+  cpu_affinity_strategy: "auto",
+  cpu_affinity_custom_cores: null,
+  cpu_affinity_exclude_cores: null,
 })
 
 // 文件上传处理

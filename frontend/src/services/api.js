@@ -28,7 +28,13 @@ apiClient.interceptors.response.use(
     return response
   },
   error => {
-    console.error('API请求失败:', error)
+    const errorMessage =
+      error.response?.data?.detail || error.message || "未知错误";
+    console.error("API请求失败:", {
+      status: error.response?.status,
+      message: errorMessage,
+      data: error.response?.data,
+    });
     return Promise.reject(error)
   }
 )

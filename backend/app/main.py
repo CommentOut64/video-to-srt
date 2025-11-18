@@ -243,31 +243,38 @@ async def create_job(filename: str = Form(...)):
 
 @app.post("/api/start")
 async def start(job_id: str = Form(...), settings: str = Form(...)):
-    settings_obj = TranscribeSettings(**json.loads(settings))
-    job = transcription_service.get_job(job_id)
-    if not job:
-        return {"error": "无效 job_id"}
-    
-    # 创建CPU亲和性配置
-    cpu_config = CPUAffinityConfig(
-        enabled=settings_obj.cpu_affinity_enabled,
-        strategy=settings_obj.cpu_affinity_strategy,
-        custom_cores=settings_obj.cpu_affinity_custom_cores,
-        exclude_cores=settings_obj.cpu_affinity_exclude_cores
-    )
-    
-    # 覆盖设置
-    job.settings = JobSettings(
-        model=settings_obj.model,
-        compute_type=settings_obj.compute_type,
-        device=settings_obj.device,
-        batch_size=settings_obj.batch_size,
-        word_timestamps=settings_obj.word_timestamps,
-        cpu_affinity=cpu_config
-    )
-    
-    transcription_service.start_job(job_id)
-    return {"job_id": job_id, "started": True}
+    try:
+        settings_obj = TranscribeSettings(**json.loads(settings))
+        job = transcription_service.get_job(job_id)
+        if not job:
+            return {"error": "无效 job_id"}
+        
+        # 创建CPU亲和性配置
+        cpu_config = CPUAffinityConfig(
+            enabled=settings_obj.cpu_affinity_enabled,
+            strategy=settings_obj.cpu_affinity_strategy,
+            custom_cores=settings_obj.cpu_affinity_custom_cores,
+            exclude_cores=settings_obj.cpu_affinity_exclude_cores
+        )
+        
+        # 覆盖设置
+        job.settings = JobSettings(
+            model=settings_obj.model,
+            compute_type=settings_obj.compute_type,
+            device=settings_obj.device,
+            batch_size=settings_obj.batch_size,
+            word_timestamps=settings_obj.word_timestamps,
+            cpu_affinity=cpu_config
+        )
+        
+        transcription_service.start_job(job_id)
+        return {"job_id": job_id, "started": True}
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON 解析失败: {str(e)}, 原始数据: {settings}")
+        raise HTTPException(status_code=400, detail=f"设置参数 JSON 格式无效: {str(e)}")
+    except Exception as e:
+        logger.error(f"启动任务失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"启动任务失败: {str(e)}")
 
 @app.post("/api/cancel/{job_id}")
 async def cancel(job_id: str):
