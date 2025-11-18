@@ -84,3 +84,5 @@ output/
 test_*
 *_test.py
 tests_output/
+
+CLAUDE.md
