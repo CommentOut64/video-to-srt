@@ -16,9 +16,15 @@ from datetime import datetime
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from processor import JobSettings, CPUAffinityConfig, get_processor, initialize_model_manager, preload_default_models, get_preload_status, get_cache_status
-from services.model_preload_manager import PreloadConfig
+# 导入新的转录服务（替换processor）
+from services.transcription_service import get_transcription_service
+from models.job_models import JobSettings
+from services.cpu_affinity_service import CPUAffinityConfig
+from services.model_preload_manager import PreloadConfig, get_model_manager
 from config.model_config import ModelPreloadConfig
+
+# 从processor导入模型管理相关函数（暂时保留，待后续阶段重构）
+from processor import initialize_model_manager, preload_default_models, get_preload_status, get_cache_status
 
 app = FastAPI(title="Video To SRT API", version="0.3.0")
 
@@ -35,14 +41,14 @@ async def startup_event():
     """应用启动事件 - 初始化模型管理器"""
     try:
         logger.info("服务启动中，初始化模型管理器...")
-        
+
         # 初始化模型管理器
         model_manager = initialize_model_manager(preload_config)
         logger.info("模型管理器初始化成功")
-        
+
         # 不在启动时预加载模型，等待前端就绪后通过API调用
         logger.info("后端服务已就绪，等待前端启动后进行模型预加载")
-        
+
     except Exception as e:
         logger.error(f"启动初始化失败: {str(e)}", exc_info=True)
 
@@ -50,7 +56,6 @@ async def startup_event():
 async def shutdown_event():
     """应用关闭事件 - 清理资源"""
     try:
-        from processor import get_model_manager
         model_manager = get_model_manager()
         if model_manager:
             model_manager.clear_cache()
@@ -73,7 +78,8 @@ print(f"DEBUG: INPUT_DIR exists = {os.path.exists(INPUT_DIR)}")
 for dir_path in [INPUT_DIR, OUTPUT_DIR, JOBS_DIR, TEMP_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
-proc = get_processor(JOBS_DIR)
+# 初始化转录服务（替换processor）
+transcription_service = get_transcription_service(JOBS_DIR)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, 
@@ -197,7 +203,7 @@ async def upload_file(file: UploadFile = File(...)):
         # 创建转录任务
         job_id = uuid.uuid4().hex
         settings = JobSettings()
-        proc.create_job(original_filename, input_path, settings, job_id=job_id)
+        transcription_service.create_job(original_filename, input_path, settings, job_id=job_id)
         
         return {
             "job_id": job_id, 
@@ -223,7 +229,7 @@ async def create_job(filename: str = Form(...)):
         
         job_id = uuid.uuid4().hex
         settings = JobSettings()
-        proc.create_job(filename, input_path, settings, job_id=job_id)
+        transcription_service.create_job(filename, input_path, settings, job_id=job_id)
         
         return {"job_id": job_id, "filename": filename}
     except HTTPException:
@@ -234,7 +240,7 @@ async def create_job(filename: str = Form(...)):
 @app.post("/api/start")
 async def start(job_id: str = Form(...), settings: str = Form(...)):
     settings_obj = TranscribeSettings(**json.loads(settings))
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         return {"error": "无效 job_id"}
     
@@ -256,27 +262,27 @@ async def start(job_id: str = Form(...), settings: str = Form(...)):
         cpu_affinity=cpu_config
     )
     
-    proc.start_job(job_id)
+    transcription_service.start_job(job_id)
     return {"job_id": job_id, "started": True}
 
 @app.post("/api/cancel/{job_id}")
 async def cancel(job_id: str):
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         return {"error": "未找到"}
-    ok = proc.cancel_job(job_id)
+    ok = transcription_service.cancel_job(job_id)
     return {"job_id": job_id, "canceled": ok}
 
 @app.get("/api/status/{job_id}")
 async def status(job_id: str):
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         return {"error": "未找到"}
     return job.to_dict()
 
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, copy_to_source: bool = False):
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务未找到")
     
@@ -320,7 +326,7 @@ async def download(job_id: str, copy_to_source: bool = False):
 @app.post("/api/copy-result/{job_id}")
 async def copy_result_to_source(job_id: str):
     """将转录结果复制到源文件目录"""
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务未找到")
     
@@ -358,7 +364,7 @@ async def ping():
 async def get_cpu_info():
     """获取系统CPU信息和亲和性支持状态"""
     try:
-        cpu_info = proc.cpu_manager.get_system_info()
+        cpu_info = transcription_service.cpu_manager.get_system_info()
         return {
             "success": True,
             "cpu_info": cpu_info,
@@ -478,7 +484,6 @@ async def start_models_preload():
         logger.info("🚀 收到模型预加载请求")
 
         # 检查模型管理器
-        from processor import get_model_manager
         model_manager = get_model_manager()
         if not model_manager:
             logger.error("❌ 模型管理器未初始化")
