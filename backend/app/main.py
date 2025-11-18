@@ -34,6 +34,12 @@ from services.model_preload_manager import (
 )
 from config.model_config import ModelPreloadConfig
 
+# 导入API路由
+from api.routes import model_routes
+
+# 导入FFmpeg管理器
+from services.ffmpeg_manager import get_ffmpeg_manager
+
 # 配置日志（在其他初始化之前）
 logger = setup_logging()
 
@@ -47,21 +53,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 注册API路由
+app.include_router(model_routes.router)
+
 @app.on_event("startup")
 async def startup_event():
-    """应用启动事件 - 初始化模型管理器"""
+    """应用启动事件 - 初始化模型管理器和FFmpeg检测"""
     try:
-        logger.info("服务启动中，初始化模型管理器...")
+        logger.info("="  * 60)
+        logger.info("服务启动中...")
+        logger.info("=" * 60)
 
-        # 初始化模型管理器
+        # 1. FFmpeg检测和自动下载
+        logger.info("步骤 1/2: 检测FFmpeg...")
+        ffmpeg_mgr = get_ffmpeg_manager()
+        try:
+            ffmpeg_path = ffmpeg_mgr.ensure_ffmpeg()
+            logger.info(f"FFmpeg检测完成: {ffmpeg_path}")
+        except RuntimeError as e:
+            # FFmpeg不可用但不阻止启动，只是记录警告
+            logger.warning(f"FFmpeg检测失败: {e}")
+            logger.warning("转录功能可能无法使用，请手动安装FFmpeg")
+
+        # 2. 初始化模型管理器
+        logger.info("步骤 2/2: 初始化模型管理器...")
         model_manager = initialize_model_manager(preload_config)
         logger.info("模型管理器初始化成功")
 
-        # 不在启动时预加载模型，等待前端��绪后通过API调用
+        # 不在启动时预加载模型，等待前端就绪后通过API调用
         logger.info("后端服务已就绪，等待前端启动后进行模型预加载")
+
+        logger.info("=" * 60)
+        logger.info("服务启动完成")
+        logger.info("=" * 60)
 
     except Exception as e:
         logger.error(f"启动初始化失败: {str(e)}", exc_info=True)
+
 
 @app.on_event("shutdown")
 async def shutdown_event():

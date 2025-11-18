@@ -138,12 +138,25 @@ class ProjectConfig:
 config = ProjectConfig()
 
 # 打印配置信息（启动时显示）
-print(f"""
-🔧 项目配置已加载
-📁 项目根目录: {config.BASE_DIR}
-📥 输入目录: {config.INPUT_DIR}
-📤 输出目录: {config.OUTPUT_DIR}
-🎬 FFmpeg: {config.get_ffmpeg_command()}
-🤖 模型缓存: {config.MODELS_DIR}
-📝 日志目录: {config.LOG_DIR}
+# 注意：避免在模块导入时使用emoji，以防编码问题
+try:
+    import sys
+    # 在Windows上设置UTF-8输出
+    if sys.platform == 'win32':
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except:
+            pass
+
+    print(f"""
+项目配置已加载
+项目根目录: {config.BASE_DIR}
+输入目录: {config.INPUT_DIR}
+输出目录: {config.OUTPUT_DIR}
+FFmpeg: {config.get_ffmpeg_command()}
+模型缓存: {config.MODELS_DIR}
+日志目录: {config.LOG_DIR}
 """)
+except Exception:
+    # 如果打印失败，静默忽略
+    pass
