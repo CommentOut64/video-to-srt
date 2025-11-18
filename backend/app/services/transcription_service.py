@@ -522,8 +522,10 @@ class TranscriptionService:
             from services.model_preload_manager import get_model_manager
             model_manager = get_model_manager()
             if model_manager:
+                self.logger.debug("✅ 使用模型管理器获取模型")
                 return model_manager.get_model(settings)
-        except ImportError:
+        except Exception as e:
+            self.logger.debug(f"⚠️ 无法使用模型管理器，回退到本地缓存: {e}")
             pass
 
         # 回退到简单缓存机制

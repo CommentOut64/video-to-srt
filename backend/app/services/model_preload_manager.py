@@ -525,16 +525,16 @@ class ModelPreloadManager:
 
 class MemoryMonitor:
     """内存监控器"""
-    
+
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-    
+
     def get_memory_info(self) -> Dict[str, Any]:
         """获取内存信息"""
         try:
             # 系统内存
             memory = psutil.virtual_memory()
-            
+
             # GPU内存 (如果可用)
             gpu_info = {}
             if torch.cuda.is_available():
@@ -543,7 +543,7 @@ class MemoryMonitor:
                     "gpu_memory_allocated": torch.cuda.memory_allocated() / (1024**3),  # GB
                     "gpu_memory_cached": torch.cuda.memory_reserved() / (1024**3),  # GB
                 }
-            
+
             return {
                 "system_memory_total": memory.total / (1024**3),  # GB
                 "system_memory_used": memory.used / (1024**3),  # GB
@@ -553,7 +553,7 @@ class MemoryMonitor:
         except Exception as e:
             self.logger.error(f"获取内存信息失败: {str(e)}")
             return {}
-    
+
     def check_memory_available(self, threshold: float = 0.85) -> bool:
         """检查内存是否充足"""
         try:
@@ -561,3 +561,77 @@ class MemoryMonitor:
             return memory.percent < (threshold * 100)
         except:
             return True  # 默认认为内存充足
+
+
+# ========== 全局单例模式 - 提供统一的模型管理器接口 ==========
+
+_model_manager: Optional[ModelPreloadManager] = None
+
+
+def initialize_model_manager(config: PreloadConfig = None) -> ModelPreloadManager:
+    """
+    初始化全局模型管理器
+
+    Args:
+        config: 预加载配置
+
+    Returns:
+        ModelPreloadManager: 模型管理器实例
+    """
+    global _model_manager
+    if _model_manager is None:
+        _model_manager = ModelPreloadManager(config)
+        logging.getLogger(__name__).info("🏗️ 全局模型预加载管理器已初始化")
+    return _model_manager
+
+
+def get_model_manager() -> Optional[ModelPreloadManager]:
+    """
+    获取全局模型管理器
+
+    Returns:
+        Optional[ModelPreloadManager]: 模型管理器实例，未初始化则返回None
+    """
+    return _model_manager
+
+
+async def preload_default_models(progress_callback=None) -> Dict[str, Any]:
+    """
+    预加载默认模型
+
+    Args:
+        progress_callback: 进度回调函数
+
+    Returns:
+        Dict: 预加载结果
+    """
+    if _model_manager is None:
+        return {"success": False, "message": "模型管理器未初始化"}
+
+    return await _model_manager.preload_models(progress_callback)
+
+
+def get_preload_status() -> Dict[str, Any]:
+    """
+    获取预加载状态
+
+    Returns:
+        Dict: 预加载状态信息
+    """
+    if _model_manager is None:
+        return {"is_preloading": False, "message": "模型管理器未初始化"}
+
+    return _model_manager.get_preload_status()
+
+
+def get_cache_status() -> Dict[str, Any]:
+    """
+    获取缓存状态
+
+    Returns:
+        Dict: 缓存状态信息
+    """
+    if _model_manager is None:
+        return {"message": "模型管理器未初始化"}
+
+    return _model_manager.get_cache_status()

@@ -20,11 +20,15 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from services.transcription_service import get_transcription_service
 from models.job_models import JobSettings
 from services.cpu_affinity_service import CPUAffinityConfig
-from services.model_preload_manager import PreloadConfig, get_model_manager
+from services.model_preload_manager import (
+    PreloadConfig,
+    get_model_manager,
+    initialize_model_manager,
+    preload_default_models,
+    get_preload_status,
+    get_cache_status
+)
 from config.model_config import ModelPreloadConfig
-
-# 从processor导入模型管理相关函数（暂时保留，待后续阶段重构）
-from processor import initialize_model_manager, preload_default_models, get_preload_status, get_cache_status
 
 app = FastAPI(title="Video To SRT API", version="0.3.0")
 
@@ -516,7 +520,7 @@ async def start_models_preload():
 async def clear_models_cache():
     """清空模型缓存 - 简化版本，立即同步状态"""
     try:
-        from processor import get_model_manager
+        from services.model_preload_manager import get_model_manager
         model_manager = get_model_manager()
         
         if model_manager:
@@ -544,7 +548,7 @@ async def clear_models_cache():
 async def reset_preload_attempts():
     """重置预加载失败计数"""
     try:
-        from processor import get_model_manager
+        from services.model_preload_manager import get_model_manager
         model_manager = get_model_manager()
         
         if model_manager:
@@ -572,9 +576,9 @@ async def shutdown_server():
     """优雅关闭服务器"""
     try:
         logger.info("收到关闭服务器请求")
-        
+
         # 清理资源
-        from processor import get_model_manager
+        from services.model_preload_manager import get_model_manager
         model_manager = get_model_manager()
         if model_manager:
             model_manager.clear_cache()
