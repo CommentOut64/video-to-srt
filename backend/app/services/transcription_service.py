@@ -306,7 +306,7 @@ class TranscriptionService:
             if job.canceled:
                 raise RuntimeError('任务已取消')
 
-            model = self._get_model(job.settings)
+            model = self._get_model(job.settings, job)
             align_cache = {}
             processed_results = []
 
@@ -495,27 +495,107 @@ class TranscriptionService:
         self.logger.debug(f"✅ 音频分段完成: 共{len(segments)}段")
         return segments
 
-    def _get_model(self, settings: JobSettings):
+    def _get_model(self, settings: JobSettings, job: Optional[JobState] = None):
         """
         获取WhisperX模型（带缓存）
 
-        优先使用模型管理器，否则使用简单缓存
+        优先使用模型管理服务检查并下载模型，否则使用简单缓存
 
         Args:
             settings: 任务设置
+            job: 任务状态对象(可选,用于更新下载进度)
 
         Returns:
             模型对象
         """
-        # 尝试使用模型管理器
+        # 尝试使用模型管理服务检查并下载模型
         try:
-            from services.model_preload_manager import get_model_manager
-            model_manager = get_model_manager()
+            from services.model_manager_service import get_model_manager
+            model_mgr = get_model_manager()
+            whisper_model_info = model_mgr.whisper_models.get(settings.model)
+
+            if whisper_model_info:
+                # 检查模型状态
+                if whisper_model_info.status == "not_downloaded" or whisper_model_info.status == "incomplete":
+                    self.logger.warning(f"⚠️ Whisper模型未下载或不完整: {settings.model}")
+
+                    # 获取模型大小信息
+                    model_size_mb = whisper_model_info.size_mb
+
+                    # 如果模型大小>=1GB,给出特殊提示
+                    download_msg = ""
+                    if model_size_mb >= 1024:
+                        size_gb = model_size_mb / 1024
+                        download_msg = f"当前下载模型大于1GB ({size_gb:.1f}GB),请耐心等待"
+                        self.logger.info(f"📦 {download_msg}")
+                    else:
+                        download_msg = f"开始下载模型 {settings.model} ({model_size_mb}MB)"
+
+                    # 更新任务状态
+                    if job:
+                        job.message = download_msg
+
+                    self.logger.info(f"🚀 自动触发下载Whisper模型: {settings.model} ({model_size_mb}MB)")
+
+                    # 触发下载
+                    success = model_mgr.download_whisper_model(settings.model)
+                    if not success:
+                        self.logger.warning(f"⚠️ 模型管理器下载失败或已在下载中,回退到whisperx")
+                        raise RuntimeError("模型管理器下载失败")
+
+                    # 等待下载完成（最多等待10分钟）
+                    import time
+                    max_wait_time = 600  # 10分钟
+                    wait_interval = 5  # 每5秒检查一次
+                    elapsed = 0
+
+                    while elapsed < max_wait_time:
+                        time.sleep(wait_interval)
+                        elapsed += wait_interval
+
+                        current_status = model_mgr.whisper_models[settings.model].status
+                        progress = model_mgr.whisper_models[settings.model].download_progress
+
+                        if current_status == "ready":
+                            self.logger.info(f"✅ Whisper模型下载完成: {settings.model}")
+                            if job:
+                                job.message = f"模型下载完成,准备加载"
+                            break
+                        elif current_status == "error":
+                            self.logger.error(f"❌ 模型管理器下载失败,回退到whisperx")
+                            raise RuntimeError(f"Whisper模型下载失败: {settings.model}")
+                        else:
+                            # 如果模型大小>=1GB,定期提醒用户耐心等待
+                            if model_size_mb >= 1024 and elapsed % 30 == 0:  # 每30秒提醒一次
+                                wait_msg = f"当前下载模型大于1GB,请耐心等待... {progress:.1f}% ({elapsed}s/{max_wait_time}s)"
+                                self.logger.info(f"⏳ {wait_msg}")
+                                if job:
+                                    job.message = wait_msg
+                            else:
+                                wait_msg = f"等待模型下载... {progress:.1f}%"
+                                self.logger.info(f"⏳ {wait_msg} ({elapsed}s/{max_wait_time}s)")
+                                # 更新任务状态(每次都更新,这样用户可以看到进度变化)
+                                if job:
+                                    job.message = wait_msg
+
+                    if elapsed >= max_wait_time:
+                        self.logger.error(f"❌ 模型下载超时,回退到whisperx")
+                        raise TimeoutError(f"Whisper模型下载超时: {settings.model}")
+
+        except Exception as e:
+            self.logger.warning(f"⚠️ 模型管理服务检查失败,回退到whisperx: {e}")
+
+        # 尝试使用模型预加载管理器
+        try:
+            from services.model_preload_manager import get_model_manager as get_preload_manager
+            model_manager = get_preload_manager()
             if model_manager:
-                self.logger.debug("✅ 使用模型管理器获取模型")
+                self.logger.debug("✅ 使用模型预加载管理器获取模型")
+                if job:
+                    job.message = "加载模型中"
                 return model_manager.get_model(settings)
         except Exception as e:
-            self.logger.debug(f"⚠️ 无法使用模型管理器，回退到本地缓存: {e}")
+            self.logger.debug(f"⚠️ 无法使用模型预加载管理器，回退到本地缓存: {e}")
             pass
 
         # 回退到简单缓存机制
@@ -523,31 +603,55 @@ class TranscriptionService:
         with _model_lock:
             if key in _model_cache:
                 self.logger.debug(f"✅ 命中模型缓存: {key}")
+                if job:
+                    job.message = "使用缓存的模型"
                 return _model_cache[key]
 
             self.logger.info(f"🔍 加载模型: {key}")
+            if job:
+                job.message = f"加载模型 {settings.model}"
 
-            # ✅ 修复：添加 download_root 和 local_files_only 参数，避免重复下载
-            from core.config import config
-            m = whisperx.load_model(
-                settings.model,
-                settings.device,
-                compute_type=settings.compute_type,
-                download_root=str(config.HF_CACHE_DIR),  # 指定缓存路径
-                local_files_only=True  # 禁止自动下载，只使用本地文件
-            )
-            _model_cache[key] = m
-            return m
+            # 首先尝试仅使用本地文件
+            try:
+                from core.config import config
+                m = whisperx.load_model(
+                    settings.model,
+                    settings.device,
+                    compute_type=settings.compute_type,
+                    download_root=str(config.HF_CACHE_DIR),  # 指定缓存路径
+                    local_files_only=True  # 禁止自动下载，只使用本地文件
+                )
+                _model_cache[key] = m
+                if job:
+                    job.message = "模型加载完成"
+                return m
+            except Exception as e:
+                self.logger.warning(f"⚠️ 本地加载失败,允许whisperx下载: {e}")
+                if job:
+                    job.message = "本地模型不存在,使用whisperx下载"
+                # 如果本地加载失败,允许whisperx下载
+                m = whisperx.load_model(
+                    settings.model,
+                    settings.device,
+                    compute_type=settings.compute_type,
+                    download_root=str(config.HF_CACHE_DIR),  # 指定缓存路径
+                    local_files_only=False  # 允许下载
+                )
+                _model_cache[key] = m
+                if job:
+                    job.message = "模型下载并加载完成"
+                return m
 
-    def _get_align_model(self, lang: str, device: str):
+    def _get_align_model(self, lang: str, device: str, job: Optional[JobState] = None):
         """
         获取对齐模型（带缓存）
 
-        集成模型管理器：如果模型不存在，会自动触发下载并等待完成
+        集成模型管理器：如果模型不存在或不完整，会自动触发下载并等待完成
 
         Args:
             lang: 语言代码
             device: 设备 (cuda/cpu)
+            job: 任务状态对象(可选,用于更新下载进度)
 
         Returns:
             Tuple[model, metadata]: 对齐模型和元数据
@@ -556,6 +660,8 @@ class TranscriptionService:
             # 检查本地缓存
             if lang in _align_model_cache:
                 self.logger.debug(f"✅ 命中对齐模型缓存: {lang}")
+                if job:
+                    job.message = "使用缓存的对齐模型"
                 return _align_model_cache[lang]
 
             # 尝试使用模型预加载管理器（优先从LRU缓存获取）
@@ -564,6 +670,8 @@ class TranscriptionService:
                 preload_mgr = get_preload_manager()
                 if preload_mgr:
                     self.logger.debug("✅ 尝试从预加载管理器获取对齐模型")
+                    if job:
+                        job.message = "加载对齐模型"
                     am, meta = preload_mgr.get_align_model(lang, device)
                     _align_model_cache[lang] = (am, meta)
                     return am, meta
@@ -576,16 +684,31 @@ class TranscriptionService:
                 model_mgr = get_model_manager()
                 align_model_info = model_mgr.align_models.get(lang)
 
-                if align_model_info and align_model_info.status == "not_downloaded":
-                    self.logger.warning(f"⚠️ 对齐模型未下载: {lang}")
+                if align_model_info and (align_model_info.status == "not_downloaded" or align_model_info.status == "incomplete"):
+                    # 检查模型状态,如果未下载或不完整则触发下载
+                    if align_model_info.status == "incomplete":
+                        self.logger.warning(f"⚠️ 对齐模型不完整: {lang}")
+                    else:
+                        self.logger.warning(f"⚠️ 对齐模型未下载: {lang}")
+
+                    # 对齐模型通常为1.2GB左右,给出大模型提示
+                    download_msg = "当前下载模型大于1GB (约1.2GB),请耐心等待"
+                    self.logger.info(f"📦 {download_msg}")
                     self.logger.info(f"🚀 自动触发下载对齐模型: {lang}")
 
-                    # 触发下载
-                    model_mgr.download_align_model(lang)
+                    # 更新任务状态
+                    if job:
+                        job.message = download_msg
 
-                    # 等待下载完成（最多等待5分钟）
+                    # 触发下载
+                    success = model_mgr.download_align_model(lang)
+                    if not success:
+                        self.logger.warning(f"⚠️ 模型管理器下载失败或已在下载中,回退到whisperx")
+                        raise RuntimeError("模型管理器下载失败")
+
+                    # 等待下载完成（最多等待10分钟,对齐模型较大）
                     import time
-                    max_wait_time = 300  # 5分钟
+                    max_wait_time = 600  # 10分钟
                     wait_interval = 5  # 每5秒检查一次
                     elapsed = 0
 
@@ -598,30 +721,63 @@ class TranscriptionService:
 
                         if current_status == "ready":
                             self.logger.info(f"✅ 对齐模型下载完成: {lang}")
+                            if job:
+                                job.message = "对齐模型下载完成,准备加载"
                             break
                         elif current_status == "error":
+                            self.logger.error(f"❌ 模型管理器下载失败,回退到whisperx")
                             raise RuntimeError(f"对齐模型下载失败: {lang}")
                         else:
-                            self.logger.info(f"⏳ 等待对齐模型下载... {progress:.1f}% ({elapsed}s/{max_wait_time}s)")
+                            # 定期提醒用户耐心等待(每30秒)
+                            if elapsed % 30 == 0:
+                                wait_msg = f"当前下载模型大于1GB,请耐心等待... {progress:.1f}% ({elapsed}s/{max_wait_time}s)"
+                                self.logger.info(f"⏳ {wait_msg}")
+                                if job:
+                                    job.message = wait_msg
+                            else:
+                                wait_msg = f"等待对齐模型下载... {progress:.1f}%"
+                                self.logger.info(f"⏳ {wait_msg} ({elapsed}s/{max_wait_time}s)")
+                                # 更新任务状态(每次都更新,这样用户可以看到进度变化)
+                                if job:
+                                    job.message = wait_msg
 
                     if elapsed >= max_wait_time:
+                        self.logger.error(f"❌ 模型下载超时,回退到whisperx")
                         raise TimeoutError(f"对齐模型下载超时: {lang}")
 
             except Exception as e:
-                self.logger.warning(f"模型管理服务检查失败: {e}")
+                self.logger.warning(f"⚠️ 模型管理服务检查失败,回退到whisperx: {e}")
 
             # 直接加载模型（如果已下载或下载完成）
             self.logger.info(f"🔍 加载对齐模型: {lang}")
+            if job:
+                job.message = f"加载对齐模型 {lang}"
 
-            # ✅ 修复：添加 model_dir 参数，指定缓存路径
-            from core.config import config
-            am, meta = whisperx.load_align_model(
-                language_code=lang,
-                device=device,
-                model_dir=str(config.HF_CACHE_DIR)  # 指定缓存路径
-            )
-            _align_model_cache[lang] = (am, meta)
-            return am, meta
+            # 首先尝试仅使用本地文件
+            try:
+                from core.config import config
+                am, meta = whisperx.load_align_model(
+                    language_code=lang,
+                    device=device,
+                    model_dir=str(config.HF_CACHE_DIR)  # 指定缓存路径
+                )
+                _align_model_cache[lang] = (am, meta)
+                if job:
+                    job.message = "对齐模型加载完成"
+                return am, meta
+            except Exception as e:
+                self.logger.warning(f"⚠️ 本地加载对齐模型失败,允许whisperx下载: {e}")
+                if job:
+                    job.message = "本地对齐模型不存在,使用whisperx下载"
+                # 如果本地加载失败,允许whisperx下载
+                am, meta = whisperx.load_align_model(
+                    language_code=lang,
+                    device=device
+                )
+                _align_model_cache[lang] = (am, meta)
+                if job:
+                    job.message = "对齐模型下载并加载完成"
+                return am, meta
 
     def _transcribe_segment(
         self,
@@ -665,7 +821,7 @@ class TranscriptionService:
 
             # 加载对齐模型
             if lang not in align_cache:
-                am, meta = self._get_align_model(lang, job.settings.device)
+                am, meta = self._get_align_model(lang, job.settings.device, job)
                 align_cache[lang] = (am, meta)
 
             am, meta = align_cache[lang]

@@ -241,14 +241,17 @@ class ModelPreloadManager:
                     self.logger.info(f"🔍 开始加载模型: {model_name} (device={device})")
                     start_time = time.time()
 
-                    model = self._load_whisper_model(settings)
+                    # 在后台线程中执行同步的模型加载，避免阻塞主线程
+                    loop = asyncio.get_event_loop()
+                    model = await loop.run_in_executor(None, self._load_whisper_model, settings)
 
                     load_time = time.time() - start_time
 
                     # 预热模型
                     if self.config.warmup_enabled:
                         self.logger.info(f"🔥 预热模型: {model_name}")
-                        self._warmup_model(model)
+                        # 在后台线程中执行预热，避免阻塞
+                        await loop.run_in_executor(None, self._warmup_model, model)
 
                     with self._global_lock:
                         self._preload_status["loaded_models"] += 1
@@ -566,6 +569,53 @@ class ModelPreloadManager:
             torch.cuda.empty_cache()
         
         self.logger.info(f"🗑️ 已清空所有模型缓存: Whisper={whisper_count}个, 对齐={align_count}个, 释放内存={total_memory}MB")
+
+    def evict_model(self, model_id: str, device: str = "cuda", compute_type: str = "float16"):
+        """
+        清理指定Whisper模型的缓存
+
+        Args:
+            model_id: 模型ID
+            device: 设备类型
+            compute_type: 计算类型
+        """
+        key = (model_id, compute_type, device)
+
+        with self._global_lock:
+            if key in self._whisper_cache:
+                info = self._whisper_cache.pop(key)
+                self.logger.info(f"🗑️ 清理模型缓存: {key}, 释放内存: {info.memory_size}MB")
+
+                # 释放内存
+                del info.model
+                del info
+
+                # 更新预加载状态中的loaded_models计数
+                self._preload_status["loaded_models"] = len(self._whisper_cache)
+                self._preload_status["cache_version"] = int(time.time())
+
+        # 垃圾回收和GPU内存清理
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def evict_align_model(self, language: str):
+        """
+        清理指定对齐模型的缓存
+
+        Args:
+            language: 语言代码
+        """
+        with self._global_lock:
+            if language in self._align_cache:
+                self._align_cache.pop(language)
+                self.logger.info(f"🗑️ 清理对齐模型缓存: {language}")
+                self._preload_status["cache_version"] = int(time.time())
+
+        # 垃圾回收和GPU内存清理
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # ========== 单模型管理接口 - 委托给模型管理服务 ==========
 

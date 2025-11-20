@@ -9,7 +9,7 @@
             Video To SRT 转录工具
           </h1>
         </el-col>
-        <el-col :span="6" style="text-align: right">
+        <el-col :span="6" style="text-align: center">
           <el-button type="primary" @click="showModelManager = true">
             <el-icon><Files /></el-icon>
             模型管理
@@ -731,7 +731,7 @@ async function startInitialPreload() {
 }
 
 .main-content {
-  padding: 40px 20px;
+  padding: 0px 0px;
 }
 
 /* 响应式设计 */
