@@ -2,8 +2,12 @@
 任务相关的数据模型定义
 """
 from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, TYPE_CHECKING
 import torch
+
+# 使用TYPE_CHECKING避免循环导入
+if TYPE_CHECKING:
+    from services.cpu_affinity_service import CPUAffinityConfig
 
 
 @dataclass
@@ -14,6 +18,7 @@ class JobSettings:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     batch_size: int = 16
     word_timestamps: bool = False
+    cpu_affinity: Optional["CPUAffinityConfig"] = None  # 使用字符串形式的类型注解
 
 
 @dataclass

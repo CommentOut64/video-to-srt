@@ -16,9 +16,32 @@ from datetime import datetime
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from processor import JobSettings, CPUAffinityConfig, get_processor, initialize_model_manager, preload_default_models, get_preload_status, get_cache_status
-from services.model_preload_manager import PreloadConfig
+# 导入核心配置和日志
+from core.config import config
+from core.logging import setup_logging
+
+# 导入新的转录服务（替换processor）
+from services.transcription_service import get_transcription_service
+from models.job_models import JobSettings
+from services.cpu_affinity_service import CPUAffinityConfig
+from services.model_preload_manager import (
+    PreloadConfig,
+    get_model_manager,
+    initialize_model_manager,
+    preload_default_models,
+    get_preload_status,
+    get_cache_status
+)
 from config.model_config import ModelPreloadConfig
+
+# 导入API路由
+from api.routes import model_routes
+
+# 导入FFmpeg管理器
+from services.ffmpeg_manager import get_ffmpeg_manager
+
+# 配置日志（在其他初始化之前）
+logger = setup_logging()
 
 app = FastAPI(title="Video To SRT API", version="0.3.0")
 
@@ -30,27 +53,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 注册API路由
+app.include_router(model_routes.router)
+
 @app.on_event("startup")
 async def startup_event():
-    """应用启动事件 - 初始化模型管理器"""
+    """应用启动事件 - 初始化模型管理器和FFmpeg检测"""
     try:
-        logger.info("服务启动中，初始化模型管理器...")
-        
-        # 初始化模型管理器
+        logger.info("="  * 60)
+        logger.info("服务启动中...")
+        logger.info("=" * 60)
+
+        # 1. 设置SSE事件循环引用（必须在模型管理器初始化之前！）
+        logger.info("步骤 1/3: 设置SSE事件循环...")
+        try:
+            from api.routes.model_routes import set_event_loop
+            if set_event_loop():
+                logger.info("✅ SSE事件循环已设置")
+            else:
+                logger.warning("⚠️ SSE事件循环设置失败，将使用备用机制")
+        except Exception as e:
+            logger.warning(f"设置SSE事件循环异常: {e}")
+
+        # 2. FFmpeg检测和自动下载
+        logger.info("步骤 2/3: 检测FFmpeg...")
+        ffmpeg_mgr = get_ffmpeg_manager()
+        try:
+            ffmpeg_path = ffmpeg_mgr.ensure_ffmpeg()
+            logger.info(f"FFmpeg检测完成: {ffmpeg_path}")
+        except RuntimeError as e:
+            # FFmpeg不可用但不阻止启动，只是记录警告
+            logger.warning(f"FFmpeg检测失败: {e}")
+            logger.warning("转录功能可能无法使用，请手动安装FFmpeg")
+
+        # 3. 初始化模型管理器（此时事件循环已设置，后台验证可以正常推送SSE）
+        logger.info("步骤 3/3: 初始化模型管理器...")
         model_manager = initialize_model_manager(preload_config)
         logger.info("模型管理器初始化成功")
-        
+
         # 不在启动时预加载模型，等待前端就绪后通过API调用
         logger.info("后端服务已就绪，等待前端启动后进行模型预加载")
-        
+
+        logger.info("=" * 60)
+        logger.info("服务启动完成")
+        logger.info("=" * 60)
+
     except Exception as e:
         logger.error(f"启动初始化失败: {str(e)}", exc_info=True)
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭事件 - 清理资源"""
     try:
-        from processor import get_model_manager
         model_manager = get_model_manager()
         if model_manager:
             model_manager.clear_cache()
@@ -58,27 +113,14 @@ async def shutdown_event():
     except Exception as e:
         logger.error(f"清理资源失败: {str(e)}")
 
-# 目录配置
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-INPUT_DIR = os.path.join(BASE_DIR, "input")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output") 
-JOBS_DIR = os.path.join(BASE_DIR, "jobs")
-TEMP_DIR = os.path.join(BASE_DIR, "temp")
+# 使用统一配置中的目录
+INPUT_DIR = str(config.INPUT_DIR)
+OUTPUT_DIR = str(config.OUTPUT_DIR)
+JOBS_DIR = str(config.JOBS_DIR)
+TEMP_DIR = str(config.TEMP_DIR)
 
-print(f"DEBUG: BASE_DIR = {BASE_DIR}")
-print(f"DEBUG: INPUT_DIR = {INPUT_DIR}")
-print(f"DEBUG: INPUT_DIR exists = {os.path.exists(INPUT_DIR)}")
-
-# 确保目录存在
-for dir_path in [INPUT_DIR, OUTPUT_DIR, JOBS_DIR, TEMP_DIR]:
-    os.makedirs(dir_path, exist_ok=True)
-
-proc = get_processor(JOBS_DIR)
-
-# 配置日志
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# 初始化转录服务
+transcription_service = get_transcription_service(JOBS_DIR)
 
 # 初始化模型预加载管理器
 preload_config = ModelPreloadConfig.get_preload_config()
@@ -197,7 +239,7 @@ async def upload_file(file: UploadFile = File(...)):
         # 创建转录任务
         job_id = uuid.uuid4().hex
         settings = JobSettings()
-        proc.create_job(original_filename, input_path, settings, job_id=job_id)
+        transcription_service.create_job(original_filename, input_path, settings, job_id=job_id)
         
         return {
             "job_id": job_id, 
@@ -223,7 +265,7 @@ async def create_job(filename: str = Form(...)):
         
         job_id = uuid.uuid4().hex
         settings = JobSettings()
-        proc.create_job(filename, input_path, settings, job_id=job_id)
+        transcription_service.create_job(filename, input_path, settings, job_id=job_id)
         
         return {"job_id": job_id, "filename": filename}
     except HTTPException:
@@ -233,50 +275,57 @@ async def create_job(filename: str = Form(...)):
 
 @app.post("/api/start")
 async def start(job_id: str = Form(...), settings: str = Form(...)):
-    settings_obj = TranscribeSettings(**json.loads(settings))
-    job = proc.get_job(job_id)
-    if not job:
-        return {"error": "无效 job_id"}
-    
-    # 创建CPU亲和性配置
-    cpu_config = CPUAffinityConfig(
-        enabled=settings_obj.cpu_affinity_enabled,
-        strategy=settings_obj.cpu_affinity_strategy,
-        custom_cores=settings_obj.cpu_affinity_custom_cores,
-        exclude_cores=settings_obj.cpu_affinity_exclude_cores
-    )
-    
-    # 覆盖设置
-    job.settings = JobSettings(
-        model=settings_obj.model,
-        compute_type=settings_obj.compute_type,
-        device=settings_obj.device,
-        batch_size=settings_obj.batch_size,
-        word_timestamps=settings_obj.word_timestamps,
-        cpu_affinity=cpu_config
-    )
-    
-    proc.start_job(job_id)
-    return {"job_id": job_id, "started": True}
+    try:
+        settings_obj = TranscribeSettings(**json.loads(settings))
+        job = transcription_service.get_job(job_id)
+        if not job:
+            return {"error": "无效 job_id"}
+        
+        # 创建CPU亲和性配置
+        cpu_config = CPUAffinityConfig(
+            enabled=settings_obj.cpu_affinity_enabled,
+            strategy=settings_obj.cpu_affinity_strategy,
+            custom_cores=settings_obj.cpu_affinity_custom_cores,
+            exclude_cores=settings_obj.cpu_affinity_exclude_cores
+        )
+        
+        # 覆盖设置
+        job.settings = JobSettings(
+            model=settings_obj.model,
+            compute_type=settings_obj.compute_type,
+            device=settings_obj.device,
+            batch_size=settings_obj.batch_size,
+            word_timestamps=settings_obj.word_timestamps,
+            cpu_affinity=cpu_config
+        )
+        
+        transcription_service.start_job(job_id)
+        return {"job_id": job_id, "started": True}
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON 解析失败: {str(e)}, 原始数据: {settings}")
+        raise HTTPException(status_code=400, detail=f"设置参数 JSON 格式无效: {str(e)}")
+    except Exception as e:
+        logger.error(f"启动任务失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"启动任务失败: {str(e)}")
 
 @app.post("/api/cancel/{job_id}")
 async def cancel(job_id: str):
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         return {"error": "未找到"}
-    ok = proc.cancel_job(job_id)
+    ok = transcription_service.cancel_job(job_id)
     return {"job_id": job_id, "canceled": ok}
 
 @app.get("/api/status/{job_id}")
 async def status(job_id: str):
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         return {"error": "未找到"}
     return job.to_dict()
 
 @app.get("/api/download/{job_id}")
 async def download(job_id: str, copy_to_source: bool = False):
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务未找到")
     
@@ -320,7 +369,7 @@ async def download(job_id: str, copy_to_source: bool = False):
 @app.post("/api/copy-result/{job_id}")
 async def copy_result_to_source(job_id: str):
     """将转录结果复制到源文件目录"""
-    job = proc.get_job(job_id)
+    job = transcription_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务未找到")
     
@@ -358,7 +407,7 @@ async def ping():
 async def get_cpu_info():
     """获取系统CPU信息和亲和性支持状态"""
     try:
-        cpu_info = proc.cpu_manager.get_system_info()
+        cpu_info = transcription_service.cpu_manager.get_system_info()
         return {
             "success": True,
             "cpu_info": cpu_info,
@@ -478,7 +527,6 @@ async def start_models_preload():
         logger.info("🚀 收到模型预加载请求")
 
         # 检查模型管理器
-        from processor import get_model_manager
         model_manager = get_model_manager()
         if not model_manager:
             logger.error("❌ 模型管理器未初始化")
@@ -511,7 +559,7 @@ async def start_models_preload():
 async def clear_models_cache():
     """清空模型缓存 - 简化版本，立即同步状态"""
     try:
-        from processor import get_model_manager
+        from services.model_preload_manager import get_model_manager
         model_manager = get_model_manager()
         
         if model_manager:
@@ -539,9 +587,9 @@ async def clear_models_cache():
 async def reset_preload_attempts():
     """重置预加载失败计数"""
     try:
-        from processor import get_model_manager
+        from services.model_preload_manager import get_model_manager
         model_manager = get_model_manager()
-        
+
         if model_manager:
             model_manager.reset_preload_attempts()
             logger.info("手动重置预加载失败计数成功")
@@ -554,12 +602,187 @@ async def reset_preload_attempts():
                 "success": False,
                 "message": "模型管理器未初始化"
             }
-            
     except Exception as e:
-        logger.error(f"重置预加载失败计数失败: {str(e)}", exc_info=True)
+        logger.error(f"❌ 重置预加载失败计数失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"重置失败: {str(e)}"
+        }
+
+# ========== 默认预加载模型配置API ==========
+
+@app.get("/api/models/preload/config")
+async def get_default_preload_config():
+    """获取默认预加载模型配置"""
+    try:
+        from services.user_config_service import get_user_config_service
+        from services.model_manager_service import get_model_manager
+
+        user_config = get_user_config_service()
+        model_manager = get_model_manager()
+
+        # 获取用户选择的模型
+        user_selected = user_config.get_default_preload_model()
+
+        # 获取所有ready的模型
+        ready_models = model_manager.get_ready_whisper_models() if model_manager else []
+
+        # 获取体积最大的ready模型
+        largest_model = model_manager.get_largest_ready_model() if model_manager else None
+
+        # 确定实际会使用的模型
+        actual_model = user_selected if user_selected and user_selected in ready_models else largest_model
+
+        return {
+            "success": True,
+            "data": {
+                "user_selected": user_selected,  # 用户选择的模型
+                "largest_model": largest_model,  # 体积最大的ready模型
+                "actual_model": actual_model,    # 实际会使用的模型
+                "ready_models": ready_models     # 所有ready的模型列表
+            }
+        }
+    except Exception as e:
+        logger.error(f"❌ 获取默认预加载配置失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"获取配置失败: {str(e)}"
+        }
+
+@app.post("/api/models/preload/config")
+async def set_default_preload_model(request: dict):
+    """设置默认预加载模型"""
+    try:
+        from services.user_config_service import get_user_config_service
+
+        model_id = request.get("model_id")
+        user_config = get_user_config_service()
+
+        success = user_config.set_default_preload_model(model_id)
+
+        if success:
+            logger.info(f"✅ 设置默认预加载模型: {model_id}")
+            return {
+                "success": True,
+                "message": f"默认预加载模型已设置为: {model_id or '自动选择'}"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "设置失败"
+            }
+    except Exception as e:
+        logger.error(f"❌ 设置默认预加载模型失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"设置失败: {str(e)}"
+        }
+
+# ========== 模型加载/卸载API ==========
+
+@app.post("/api/models/cache/unload")
+async def unload_model(request: dict):
+    """卸载指定模型"""
+    try:
+        from services.model_preload_manager import get_model_manager as get_preload_manager
+
+        model_id = request.get("model_id")
+        device = request.get("device", "cuda")
+        compute_type = request.get("compute_type", "float16")
+
+        if not model_id:
+            return {
+                "success": False,
+                "message": "缺少model_id参数"
+            }
+
+        preload_manager = get_preload_manager()
+        if not preload_manager:
+            return {
+                "success": False,
+                "message": "模型管理器未初始化"
+            }
+
+        preload_manager.evict_model(model_id, device, compute_type)
+        logger.info(f"✅ 卸载模型: {model_id}")
+
+        return {
+            "success": True,
+            "message": f"模型 {model_id} 已卸载"
+        }
+    except Exception as e:
+        logger.error(f"❌ 卸载模型失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"卸载失败: {str(e)}"
+        }
+
+@app.post("/api/models/preload/load-specific")
+async def load_specific_model(request: dict):
+    """加载指定模型"""
+    try:
+        from services.model_preload_manager import get_model_manager as get_preload_manager, PreloadConfig
+        from models.job_models import JobSettings
+        import torch
+
+        model_id = request.get("model_id")
+
+        if not model_id:
+            return {
+                "success": False,
+                "message": "缺少model_id参数"
+            }
+
+        preload_manager = get_preload_manager()
+        if not preload_manager:
+            return {
+                "success": False,
+                "message": "模型管理器未初始化"
+            }
+
+        # 检查模型状态
+        from services.model_manager_service import get_model_manager
+        model_mgr = get_model_manager()
+        status, local_path, detail = model_mgr._check_whisper_model_exists(model_id)
+
+        if status != "ready":
+            return {
+                "success": False,
+                "message": f"模型未就绪: {status}"
+            }
+
+        # 准备加载参数
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        settings = JobSettings(
+            model=model_id,
+            compute_type="float16",
+            device=device
+        )
+
+        # 加载模型
+        logger.info(f"🔄 开始加载模型: {model_id}")
+        model = await asyncio.get_event_loop().run_in_executor(
+            None,
+            preload_manager.get_model,
+            settings
+        )
+
+        if model:
+            logger.info(f"✅ 模型加载成功: {model_id}")
+            return {
+                "success": True,
+                "message": f"模型 {model_id} 加载成功"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "模型加载失败"
+            }
+    except Exception as e:
+        logger.error(f"❌ 加载模型失败: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"加载失败: {str(e)}"
         }
 
 @app.post("/api/shutdown")
@@ -567,9 +790,9 @@ async def shutdown_server():
     """优雅关闭服务器"""
     try:
         logger.info("收到关闭服务器请求")
-        
+
         # 清理资源
-        from processor import get_model_manager
+        from services.model_preload_manager import get_model_manager
         model_manager = get_model_manager()
         if model_manager:
             model_manager.clear_cache()
