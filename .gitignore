@@ -1,0 +1,91 @@
+# 临时文件和缓存
+temp/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+.claude
+.github
+
+# PyInstaller 构建文件
+build/
+dist/
+*.spec
+*.exe
+
+# 前端依赖和构建
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# 任务文件和上传内容
+jobs/
+uploads/
+models/
+
+# 日志文件
+*.log
+logs/
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE 文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python 虚拟环境
+venv/
+env/
+ENV/
+.env
+
+# 临时文件
+*.tmp
+*.temp
+.cache/
+
+# 备份文件
+*.bak
+*.backup
+*.old
+
+# 媒体文件（避免意外提交大文件）
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wav
+*.mp3
+*.flac
+*.aac
+
+# 输出文件
+*.srt
+*.txt
+*.csv
+output/
+
+# 测试文件
+test_*
+*_test.py
+tests_output/
+
+CLAUDE.md
