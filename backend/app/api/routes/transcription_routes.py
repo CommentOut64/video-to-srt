@@ -392,6 +392,85 @@ def create_transcription_router(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"读取检查点失败: {str(e)}")
 
+    @router.get("/transcription-text/{job_id}")
+    async def get_transcription_text(job_id: str):
+        """
+        从checkpoint中提取已完成的转录文字（未对齐版本）
+
+        用于SSE断线重连后，前端可以调用此API获取当前已转录的所有文字
+
+        返回格式：
+        {
+            "job_id": "...",
+            "has_checkpoint": true,
+            "language": "zh",
+            "segments": [
+                {"id": 0, "start": 10.5, "end": 15.2, "text": "第一句话"},
+                {"id": 1, "start": 15.2, "end": 20.0, "text": "第二句话"}
+            ],
+            "progress": {
+                "processed": 50,
+                "total": 100,
+                "percentage": 50.0
+            }
+        }
+        """
+        from pathlib import Path
+
+        job = transcription_service.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="任务未找到")
+
+        job_dir = Path(job.dir)
+        checkpoint_path = job_dir / "checkpoint.json"
+
+        if not checkpoint_path.exists():
+            return {
+                "job_id": job_id,
+                "has_checkpoint": False,
+                "message": "没有检查点数据"
+            }
+
+        try:
+            with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # 提取未对齐结果
+            unaligned_results = data.get("unaligned_results", [])
+
+            # 合并所有segments
+            all_segments = []
+            detected_language = None
+            for result in unaligned_results:
+                if not detected_language and 'language' in result:
+                    detected_language = result['language']
+                all_segments.extend(result.get('segments', []))
+
+            # 按时间排序
+            all_segments.sort(key=lambda x: x.get('start', 0))
+
+            # 重新编号
+            for idx, seg in enumerate(all_segments):
+                seg['id'] = idx
+
+            return {
+                "job_id": job_id,
+                "has_checkpoint": True,
+                "language": detected_language or job.language or "unknown",
+                "segments": all_segments,
+                "progress": {
+                    "processed": len(data.get("processed_indices", [])),
+                    "total": data.get("total_segments", 0),
+                    "percentage": round(
+                        len(data.get("processed_indices", [])) / max(1, data.get("total_segments", 1)) * 100,
+                        2
+                    )
+                }
+            }
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取转录文字失败: {str(e)}")
+
     @router.post("/validate-resume-settings")
     async def validate_resume_settings(
         job_id: str = Form(...),

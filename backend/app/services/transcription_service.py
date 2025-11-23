@@ -546,6 +546,77 @@ class TranscriptionService:
         except Exception as e:
             self.logger.debug(f"SSE信号推送失败（非致命）: {e}")
 
+    def _push_sse_segment(self, job: JobState, segment_result: dict, processed: int, total: int):
+        """
+        推送单个segment的转录结果（流式输出）
+
+        Args:
+            job: 任务状态对象
+            segment_result: 单个segment的转录结果（未对齐）
+            processed: 已处理的segment数量
+            total: 总segment数量
+        """
+        try:
+            # 动态获取SSE管理器
+            from services.sse_service import get_sse_manager
+            sse_manager = get_sse_manager()
+
+            channel_id = f"job:{job.job_id}"
+            sse_manager.broadcast_sync(
+                channel_id,
+                "segment",
+                {
+                    "segment_index": segment_result.get('segment_index', 0),
+                    "segments": segment_result.get('segments', []),
+                    "language": segment_result.get('language', job.language),
+                    "progress": {
+                        "processed": processed,
+                        "total": total,
+                        "percentage": round(processed / max(1, total) * 100, 2)
+                    }
+                }
+            )
+            self.logger.debug(f"📤 推送segment #{segment_result.get('segment_index', 0)} 转录结果")
+        except Exception as e:
+            # SSE推送失败不应影响转录流程
+            self.logger.debug(f"SSE segment推送失败（非致命）: {e}")
+
+    def _push_sse_aligned(self, job: JobState, aligned_results: List[Dict]):
+        """
+        推送对齐完成事件（流式输出）
+
+        Args:
+            job: 任务状态对象
+            aligned_results: 对齐后的结果列表
+        """
+        try:
+            # 动态获取SSE管理器
+            from services.sse_service import get_sse_manager
+            sse_manager = get_sse_manager()
+
+            channel_id = f"job:{job.job_id}"
+
+            # 提取对齐后的segments
+            segments = []
+            word_segments = []
+            if aligned_results and len(aligned_results) > 0:
+                segments = aligned_results[0].get('segments', [])
+                word_segments = aligned_results[0].get('word_segments', [])
+
+            sse_manager.broadcast_sync(
+                channel_id,
+                "aligned",
+                {
+                    "segments": segments,
+                    "word_segments": word_segments,
+                    "message": "对齐完成"
+                }
+            )
+            self.logger.info(f"📤 推送对齐完成事件，共 {len(segments)} 条字幕")
+        except Exception as e:
+            # SSE推送失败不应影响转录流程
+            self.logger.debug(f"SSE aligned推送失败（非致命）: {e}")
+
     def _save_checkpoint(self, job_dir: Path, data: dict, job: JobState):
         """
         原子性保存检查点
@@ -776,6 +847,10 @@ class TranscriptionService:
                     f'转录中 {len(processed_indices)}/{len(current_segments)}'
                 )
 
+                # 【流式输出】立即推送单个segment的转录结果
+                if seg_result:
+                    self._push_sse_segment(job, seg_result, len(processed_indices), len(current_segments))
+
                 # 【关键埋点2】每处理一段保存一次（保存未对齐结果）
                 checkpoint_data = {
                     "job_id": job.job_id,
@@ -802,6 +877,9 @@ class TranscriptionService:
                 job,
                 str(audio_path)
             )
+
+            # 【流式输出】推送对齐完成事件
+            self._push_sse_aligned(job, aligned_results)
 
             if job.canceled:
                 raise RuntimeError('任务已取消')
