@@ -5,10 +5,22 @@
 import os, subprocess, uuid, threading, json, math, gc, logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from enum import Enum
 from pydub import AudioSegment, silence
 import whisperx
 import torch
 import shutil
+import psutil
+import numpy as np
+
+
+class ProcessingMode(Enum):
+    """
+    处理模式枚举
+    用于智能决策使用内存模式还是硬盘模式进行音频处理
+    """
+    MEMORY = "memory"  # 内存模式（默认，高性能）
+    DISK = "disk"      # 硬盘模式（降级，稳定性优先）
 
 from models.job_models import JobSettings, JobState
 from models.hardware_models import HardwareInfo, OptimizationConfig
@@ -953,6 +965,133 @@ class TranscriptionService:
                 torch.cuda.empty_cache()
 
     # ========== 核心处理方法 ==========
+
+    def _get_audio_duration(self, audio_path: str) -> float:
+        """
+        获取音频时长（秒）
+
+        Args:
+            audio_path: 音频文件路径
+
+        Returns:
+            float: 音频时长（秒）
+        """
+        try:
+            # 方法1: 使用pydub（精确但较慢）
+            audio = AudioSegment.from_wav(audio_path)
+            duration = len(audio) / 1000.0
+            self.logger.debug(f"音频时长（pydub）: {duration:.1f}秒")
+            return duration
+        except Exception as e:
+            self.logger.warning(f"pydub获取时长失败，使用文件大小估算: {e}")
+            # 方法2: 根据文件大小估算（16kHz, 16bit, mono ≈ 32KB/秒）
+            try:
+                file_size = os.path.getsize(audio_path)
+                duration = file_size / 32000
+                self.logger.debug(f"音频时长（估算）: {duration:.1f}秒")
+                return duration
+            except Exception as e2:
+                self.logger.error(f"获取音频时长失败: {e2}")
+                return 0.0
+
+    def _decide_processing_mode(self, audio_path: str, job: JobState) -> ProcessingMode:
+        """
+        智能决策处理模式（内存模式 vs 硬盘模式）
+
+        决策逻辑：
+        1. 估算音频内存需求
+        2. 检测系统可用内存
+        3. 预留安全余量（模型、转录中间变量等）
+        4. 决定使用哪种模式
+
+        Args:
+            audio_path: 音频文件路径
+            job: 任务状态对象
+
+        Returns:
+            ProcessingMode: 处理模式
+        """
+        # 获取音频时长（秒）
+        audio_duration_sec = self._get_audio_duration(audio_path)
+
+        # 估算音频内存需求 (16kHz, float32)
+        # 公式: duration * 16000 * 4 bytes
+        estimated_audio_mb = (audio_duration_sec * 16000 * 4) / (1024 * 1024)
+
+        # 预留额外内存（模型加载、VAD处理、转录中间变量等）
+        # 保守估计：音频内存的2倍 + 500MB基础开销
+        total_estimated_mb = estimated_audio_mb * 2 + 500
+
+        # 获取系统可用内存
+        mem_info = psutil.virtual_memory()
+        available_mb = mem_info.available / (1024 * 1024)
+        total_mb = mem_info.total / (1024 * 1024)
+
+        # 安全阈值：至少保留系统总内存的20%或2GB（取较大值）
+        safety_reserve_mb = max(total_mb * 0.2, 2048)
+        usable_mb = available_mb - safety_reserve_mb
+
+        self.logger.info(f"📊 内存评估:")
+        self.logger.info(f"   音频时长: {audio_duration_sec/60:.1f}分钟")
+        self.logger.info(f"   预估需求: {total_estimated_mb:.0f}MB")
+        self.logger.info(f"   可用内存: {available_mb:.0f}MB")
+        self.logger.info(f"   安全余量: {safety_reserve_mb:.0f}MB")
+        self.logger.info(f"   可用于处理: {usable_mb:.0f}MB")
+
+        # 决策
+        if usable_mb >= total_estimated_mb:
+            self.logger.info("✅ 选择【内存模式】- 内存充足，使用高性能模式")
+            job.message = "内存充足，使用高性能模式"
+            return ProcessingMode.MEMORY
+        else:
+            self.logger.warning(f"⚠️ 选择【硬盘模式】- 内存不足（需要{total_estimated_mb:.0f}MB，可用{usable_mb:.0f}MB）")
+            job.message = "内存受限，使用稳定模式"
+            return ProcessingMode.DISK
+
+    def _safe_load_audio(self, audio_path: str, job: JobState) -> np.ndarray:
+        """
+        安全加载音频到内存（带异常处理）
+
+        用于内存模式下将完整音频一次性加载到内存中。
+        包含加载验证和详细的异常处理，加载失败时抛出RuntimeError触发降级。
+
+        Args:
+            audio_path: 音频文件路径
+            job: 任务状态对象（用于更新状态消息）
+
+        Returns:
+            np.ndarray: 音频数组（float32, 16kHz采样率）
+
+        Raises:
+            RuntimeError: 音频加载失败时抛出，调用方可据此触发硬盘模式降级
+        """
+        try:
+            self.logger.info(f"加载音频到内存: {audio_path}")
+            audio_array = whisperx.load_audio(audio_path)
+
+            # 验证加载结果
+            if audio_array is None or len(audio_array) == 0:
+                raise ValueError("音频数组为空")
+
+            # 记录加载信息
+            duration_sec = len(audio_array) / 16000
+            memory_mb = audio_array.nbytes / (1024 * 1024)
+            self.logger.info(f"音频加载成功:")
+            self.logger.info(f"   时长: {duration_sec/60:.1f}分钟")
+            self.logger.info(f"   内存占用: {memory_mb:.1f}MB")
+            self.logger.info(f"   采样点数: {len(audio_array):,}")
+
+            return audio_array
+
+        except MemoryError as e:
+            self.logger.error(f"内存不足，无法加载音频: {e}")
+            job.message = "内存不足，自动切换到硬盘模式"
+            raise RuntimeError(f"内存不足: {e}")
+
+        except Exception as e:
+            self.logger.error(f"音频加载失败: {e}")
+            job.message = f"音频加载失败: {e}"
+            raise RuntimeError(f"音频加载失败（可能文件损坏）: {e}")
 
     def _extract_audio(self, input_file: str, audio_out: str) -> bool:
         """
