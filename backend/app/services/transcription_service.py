@@ -1954,6 +1954,196 @@ class TranscriptionService:
             del audio
             gc.collect()
 
+    def _transcribe_segment_in_memory(
+        self,
+        audio_array: np.ndarray,
+        seg_meta: Dict,
+        model,
+        job: JobState
+    ) -> Optional[Dict]:
+        """
+        从内存切片转录（Zero-copy，高性能）
+
+        内存模式下使用，直接从完整音频数组中切片，无需磁盘IO。
+
+        Args:
+            audio_array: 完整音频数组
+            seg_meta: 分段元数据 {"index": 0, "start": 0.0, "end": 30.5, "mode": "memory"}
+            model: Whisper模型
+            job: 任务状态
+
+        Returns:
+            Dict: 未对齐的转录结果
+        """
+        sr = 16000
+        start_sample = int(seg_meta['start'] * sr)
+        end_sample = int(seg_meta['end'] * sr)
+
+        # Zero-copy切片（numpy view，不复制数据）
+        audio_slice = audio_array[start_sample:end_sample]
+
+        try:
+            # Whisper转录
+            rs = model.transcribe(
+                audio_slice,
+                batch_size=job.settings.batch_size,
+                verbose=False,
+                language=job.language
+            )
+
+            if not rs or 'segments' not in rs:
+                return None
+
+            # 检测语言（首次）
+            if not job.language and 'language' in rs:
+                job.language = rs['language']
+                self.logger.info(f"detected language: {job.language}")
+
+            # 时间偏移校正
+            start_offset = seg_meta['start']
+            adjusted_segments = []
+
+            for idx, s in enumerate(rs['segments']):
+                adjusted_segments.append({
+                    'id': idx,
+                    'start': s.get('start', 0) + start_offset,
+                    'end': s.get('end', 0) + start_offset,
+                    'text': s.get('text', '').strip()
+                })
+
+            return {
+                'segment_index': seg_meta['index'],
+                'language': rs.get('language', job.language),
+                'segments': adjusted_segments
+            }
+
+        finally:
+            # 注意：audio_slice是view，不需要单独释放
+            gc.collect()
+
+    def _transcribe_segment_from_disk(
+        self,
+        seg: Dict,
+        model,
+        job: JobState
+    ) -> Optional[Dict]:
+        """
+        从文件加载转录（硬盘模式）
+
+        硬盘模式下使用，从segment文件加载音频进行转录。
+
+        Args:
+            seg: 分段信息 {"index": 0, "file": "segment_0.wav", "start": 0.0, "end": 30.0, "mode": "disk"}
+            model: Whisper模型
+            job: 任务状态
+
+        Returns:
+            Dict: 未对齐的转录结果
+        """
+        audio = whisperx.load_audio(seg['file'])
+
+        try:
+            rs = model.transcribe(
+                audio,
+                batch_size=job.settings.batch_size,
+                verbose=False,
+                language=job.language
+            )
+
+            if not rs or 'segments' not in rs:
+                return None
+
+            # 检测语言（首次）
+            if not job.language and 'language' in rs:
+                job.language = rs['language']
+                self.logger.info(f"detected language: {job.language}")
+
+            # 时间偏移校正（使用start字段，秒为单位）
+            start_offset = seg.get('start', seg.get('start_ms', 0) / 1000.0)
+            adjusted_segments = []
+
+            for idx, s in enumerate(rs['segments']):
+                adjusted_segments.append({
+                    'id': idx,
+                    'start': s.get('start', 0) + start_offset,
+                    'end': s.get('end', 0) + start_offset,
+                    'text': s.get('text', '').strip()
+                })
+
+            return {
+                'segment_index': seg['index'],
+                'language': rs.get('language', job.language),
+                'segments': adjusted_segments
+            }
+
+        finally:
+            del audio
+            gc.collect()
+
+    def _transcribe_segment(
+        self,
+        seg_meta: Dict,
+        model,
+        job: JobState,
+        audio_array: Optional[np.ndarray] = None
+    ) -> Optional[Dict]:
+        """
+        统一转录入口（根据模式自动选择）
+
+        Args:
+            seg_meta: 分段元数据
+            model: Whisper模型
+            job: 任务状态
+            audio_array: 音频数组（内存模式时必须提供）
+
+        Returns:
+            Dict: 未对齐的转录结果
+        """
+        mode = seg_meta.get('mode', 'disk')
+
+        if mode == 'memory':
+            if audio_array is None:
+                raise ValueError("memory mode requires audio_array parameter")
+            return self._transcribe_segment_in_memory(audio_array, seg_meta, model, job)
+        else:
+            return self._transcribe_segment_from_disk(seg_meta, model, job)
+
+    def _check_memory_during_transcription(self, job: JobState) -> bool:
+        """
+        转录过程中检查内存状态
+
+        如果内存严重不足，暂停任务并警告用户。
+
+        Args:
+            job: 任务状态对象
+
+        Returns:
+            bool: True=继续处理，False=需要暂停
+        """
+        mem_info = psutil.virtual_memory()
+        available_mb = mem_info.available / (1024 * 1024)
+        percent_used = mem_info.percent
+
+        # 危险阈值：可用内存<500MB 或 使用率>95%
+        if available_mb < 500 or percent_used > 95:
+            self.logger.error(f"memory critically low! available: {available_mb:.0f}MB, usage: {percent_used}%")
+            job.status = 'paused'
+            job.message = f"memory insufficient (available {available_mb:.0f}MB), please close other programs"
+            job.paused = True
+
+            # 推送警告SSE
+            self._push_sse_signal(job, "memory_warning",
+                f"memory critically low (available {available_mb:.0f}MB), task paused")
+
+            return False
+
+        # 警告阈值：可用内存<1GB 或 使用率>90%
+        if available_mb < 1024 or percent_used > 90:
+            self.logger.warning(f"memory tight: available {available_mb:.0f}MB, usage {percent_used}%")
+            # 不暂停，但记录警告
+
+        return True
+
     def _align_all_results(
         self,
         unaligned_results: List[Dict],
@@ -2008,89 +2198,6 @@ class TranscriptionService:
                 'segments': aligned.get('segments', []),
                 'word_segments': aligned.get('word_segments', [])
             }]
-
-        finally:
-            del audio
-            gc.collect()
-
-    def _transcribe_segment(
-        self,
-        seg: Dict,
-        model,
-        job: JobState,
-        align_cache: Dict
-    ):
-        """
-        转录单个音频段
-
-        Args:
-            seg: 段信息 {file, start_ms, duration_ms}
-            model: Whisper模型
-            job: 任务状态
-            align_cache: 对齐模型缓存
-
-        Returns:
-            Dict: 转录结果（包含segments和word_segments）
-        """
-        audio = whisperx.load_audio(seg['file'])
-
-        try:
-            # Whisper转录
-            rs = model.transcribe(
-                audio,
-                batch_size=job.settings.batch_size,
-                verbose=False,
-                language=job.language
-            )
-
-            if not rs or 'segments' not in rs:
-                return None
-
-            # 检测语言
-            if not job.language and 'language' in rs:
-                job.language = rs['language']
-                self.logger.info(f"🌐 检测到语言: {job.language}")
-
-            lang = job.language or rs.get('language')
-
-            # 加载对齐模型
-            if lang not in align_cache:
-                am, meta = self._get_align_model(lang, job.settings.device, job)
-                align_cache[lang] = (am, meta)
-
-            am, meta = align_cache[lang]
-
-            # 词级对齐
-            aligned = whisperx.align(
-                rs['segments'],
-                am,
-                meta,
-                audio,
-                job.settings.device
-            )
-
-            # 时间偏移校正（重要！）
-            start_offset = seg['start_ms'] / 1000.0
-            final = {'segments': []}
-
-            if 'segments' in aligned:
-                for s in aligned['segments']:
-                    if 'start' in s:
-                        s['start'] += start_offset
-                    if 'end' in s:
-                        s['end'] += start_offset
-                    final['segments'].append(s)
-
-            if 'word_segments' in aligned:
-                final['word_segments'] = []
-                for w in aligned['word_segments']:
-                    if 'start' in w:
-                        w['start'] += start_offset
-                    if 'end' in w:
-                        w['end'] += start_offset
-                    final['word_segments'].append(w)
-
-            return final
 
         finally:
             del audio
