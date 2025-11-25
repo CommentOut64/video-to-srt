@@ -57,7 +57,8 @@ def setup_logging():
 
     # 创建根日志处理器
     root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, config.LOG_LEVEL))
+    log_level = getattr(logging, config.LOG_LEVEL)
+    root_logger.setLevel(logging.DEBUG)  # 设置根logger为DEBUG，让处理器来控制级别
 
     # 清除已有的处理器
     root_logger.handlers.clear()
@@ -67,12 +68,14 @@ def setup_logging():
 
     # 控制台输出
     console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)  # 在处理器层面设置级别
     console_handler.setFormatter(formatter)
     console_handler.addFilter(ThirdPartyFilter())
     root_logger.addHandler(console_handler)
 
     # 文件输出
     file_handler = logging.FileHandler(config.LOG_FILE, encoding='utf-8')
+    file_handler.setLevel(log_level)  # 在处理器层面设置级别
     file_handler.setFormatter(formatter)
     file_handler.addFilter(ThirdPartyFilter())
     root_logger.addHandler(file_handler)
