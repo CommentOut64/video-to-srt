@@ -29,7 +29,7 @@ frontend/.env.production.local
 # 任务文件和上传内容
 jobs/
 uploads/
-models/
+/models/
 
 # 日志文件
 *.log
@@ -79,7 +79,6 @@ ENV/
 
 # 输出文件
 *.srt
-*.txt
 *.csv
 output/
 
