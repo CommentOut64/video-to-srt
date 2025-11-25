@@ -22,9 +22,45 @@
       </div>
     </template>
 
+    <!-- 从input目录选择文件 -->
+    <div class="input-files-section">
+      <el-divider content-position="left">从input目录选择文件</el-divider>
+
+      <el-alert v-if="loadingInputFiles" type="info" :closable="false">
+        正在加载input目录文件...
+      </el-alert>
+
+      <div v-else-if="inputFiles.length > 0" class="input-files-grid">
+        <el-checkbox-group v-model="selectedInputFiles">
+          <el-checkbox
+            v-for="file in inputFiles"
+            :key="file.name"
+            :label="file.name"
+            class="file-checkbox"
+          >
+            <span class="file-name">{{ file.name }}</span>
+            <span class="file-size">({{ formatFileSize(file.size) }})</span>
+          </el-checkbox>
+        </el-checkbox-group>
+
+        <el-button
+          v-if="selectedInputFiles.length > 0"
+          type="primary"
+          @click="createJobsFromInput"
+          :loading="creatingJobs"
+          style="margin-top: 12px; width: 100%;"
+        >
+          <el-icon><VideoPlay /></el-icon>
+          创建任务并启动 ({{ selectedInputFiles.length }} 个文件)
+        </el-button>
+      </div>
+
+      <el-empty v-else description="input目录中没有媒体文件" />
+    </div>
+
     <!-- 批量上传区域 -->
     <div class="batch-upload-section">
-      <el-divider content-position="left">批量上传测试</el-divider>
+      <el-divider content-position="left">手动上传文件</el-divider>
       <el-upload
         class="upload-area"
         drag
@@ -202,12 +238,13 @@
         <template #title>V2.2 任务队列测试要点</template>
         <template #default>
           <ol style="margin: 8px 0; padding-left: 20px;">
-            <li>批量上传3个视频文件</li>
-            <li>快速点击所有"开始"按钮</li>
-            <li>观察：应该只有1个任务显示"执行中"，其他显示"排队中"</li>
-            <li>测试暂停：点击执行中任务的"暂停"</li>
+            <li>从input目录选择3个视频文件，点击"创建任务并启动"</li>
+            <li>或者手动上传3个视频文件</li>
+            <li>观察：应该只有1个任务显示"处理中"，其他显示"排队中"</li>
+            <li>测试暂停：点击处理中任务的"暂停"</li>
             <li>测试取消：点击排队中任务的"取消"</li>
             <li>测试插队：点击排队任务的"插队"按钮（如果实现了V2.4）</li>
+            <li>强制重启后端以测试队列恢复功能</li>
           </ol>
         </template>
       </el-alert>
@@ -219,6 +256,12 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
+
+// input目录文件相关
+const inputFiles = ref([])
+const selectedInputFiles = ref([])
+const loadingInputFiles = ref(false)
+const creatingJobs = ref(false)
 
 // 文件上传相关
 const uploadFileList = ref([])
@@ -233,6 +276,86 @@ const pollTimer = ref(null)
 const queuedCount = computed(() => tasks.value.filter(t => t.status === 'queued').length)
 const runningCount = computed(() => tasks.value.filter(t => t.status === 'processing').length)
 const finishedCount = computed(() => tasks.value.filter(t => t.status === 'finished').length)
+
+// 加载input目录文件
+async function loadInputFiles() {
+  loadingInputFiles.value = true
+  try {
+    const response = await axios.get('/api/files')
+    inputFiles.value = response.data
+    ElMessage.success(`从input目录加载了 ${response.data.length} 个文件`)
+  } catch (error) {
+    console.error('加载input文件失败:', error)
+    ElMessage.error('加载input目录文件失败')
+  } finally {
+    loadingInputFiles.value = false
+  }
+}
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes'
+  const k = 1024
+  const sizes = ['Bytes', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
+}
+
+// 从input目录创建任务
+async function createJobsFromInput() {
+  if (selectedInputFiles.value.length === 0) {
+    ElMessage.warning('请选择至少一个文件')
+    return
+  }
+
+  creatingJobs.value = true
+  let successCount = 0
+  let failCount = 0
+
+  for (const filename of selectedInputFiles.value) {
+    try {
+      // 创建任务
+      const formData = new FormData()
+      formData.append('filename', filename)
+
+      const response = await axios.post('/api/create-job', formData)
+      const jobData = response.data
+
+      // 添加到任务列表
+      tasks.value.push({
+        job_id: jobData.job_id,
+        filename: jobData.filename,
+        status: 'created',
+        queue_position: -1,
+        progress: 0,
+        message: '任务已创建',
+        starting: false,
+        pausing: false,
+        canceling: false,
+        prioritizing: false
+      })
+
+      // 自动启动任务
+      await startTask(tasks.value[tasks.value.length - 1])
+      successCount++
+      ElMessage.success(`任务 ${filename} 已创建并启动`)
+
+    } catch (error) {
+      failCount++
+      console.error('创建任务失败:', error)
+      ElMessage.error(`文件 ${filename} 创建任务失败`)
+    }
+  }
+
+  // 清空选择
+  selectedInputFiles.value = []
+  creatingJobs.value = false
+
+  ElMessage.info(`创建完成：成功 ${successCount} 个，失败 ${failCount} 个`)
+
+  // 刷新队列状态
+  setTimeout(() => refreshQueue(), 1000)
+}
 
 // 文件处理
 function handleFileChange(file, fileList) {
@@ -326,8 +449,17 @@ async function refreshQueue() {
           message: data.message || '',
         })
       } catch (error) {
-        console.error(`获取任务 ${task.job_id} 状态失败:`, error)
-        updatedTasks.push(task)
+        // 忽略404错误（任务可能已被清理）
+        if (error.response && error.response.status === 404) {
+          console.log(`任务 ${task.job_id} 未找到，可能已被清理`)
+          // 如果任务状态是已完成，保留它；否则移除
+          if (task.status === 'finished') {
+            updatedTasks.push(task)
+          }
+        } else {
+          console.error(`获取任务 ${task.job_id} 状态失败:`, error)
+          updatedTasks.push(task)
+        }
       }
     }
 
@@ -442,7 +574,7 @@ async function prioritizeTask(task) {
 
 // 状态判断函数
 function canStart(task) {
-  return ['uploaded', 'paused', 'failed'].includes(task.status)
+  return ['uploaded', 'created', 'paused', 'failed'].includes(task.status)
 }
 
 function canPause(task) {
@@ -460,6 +592,7 @@ function canPrioritize(task) {
 // 状态显示函数
 function getStatusType(status) {
   const statusMap = {
+    'created': 'info',
     'uploaded': 'info',
     'queued': 'warning',
     'processing': 'primary',
@@ -473,6 +606,7 @@ function getStatusType(status) {
 
 function getStatusText(status) {
   const statusMap = {
+    'created': '已创建',
     'uploaded': '已上传',
     'queued': '排队中',
     'processing': '处理中',
@@ -503,6 +637,7 @@ function stopPolling() {
 
 // 生命周期
 onMounted(() => {
+  loadInputFiles() // 加载input目录文件
   startPolling()
 })
 
@@ -527,6 +662,35 @@ onUnmounted(() => {
   font-size: 1.1rem;
   font-weight: 600;
   color: #2c3e50;
+}
+
+.input-files-section {
+  margin-bottom: 30px;
+}
+
+.input-files-grid {
+  background: #f5f7fa;
+  padding: 16px;
+  border-radius: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.file-checkbox {
+  display: block;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.file-name {
+  font-weight: 500;
+  color: #303133;
+}
+
+.file-size {
+  color: #909399;
+  font-size: 0.9rem;
+  margin-left: 8px;
 }
 
 .batch-upload-section {
