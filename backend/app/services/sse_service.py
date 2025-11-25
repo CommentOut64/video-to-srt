@@ -50,7 +50,7 @@ class SSEManager:
         # 主事件循环引用（在应用启动时设置）
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
-        logger.info(f"✅ SSE管理器已初始化 (心跳: {heartbeat_interval}s, 队列: {max_queue_size})")
+        logger.info(f"SSE管理器已初始化 (心跳: {heartbeat_interval}s, 队列: {max_queue_size})")
 
     async def subscribe(
         self,
@@ -77,7 +77,7 @@ class SSEManager:
         connection_id = f"{channel_id}#{len(self.connections[channel_id])}"
 
         try:
-            logger.info(f"✅ SSE连接已建立: {connection_id} (频道: {channel_id}, 总连接: {self._get_total_active_connections()})")
+            logger.info(f"SSE连接已建立: {connection_id} (频道: {channel_id}, 总连接: {self._get_total_active_connections()})")
 
             # 1. 发送连接成功消息
             yield self._format_sse("connected", {
@@ -92,7 +92,7 @@ class SSEManager:
                     initial_state = initial_state_callback()
                     if initial_state:
                         yield self._format_sse("initial_state", initial_state)
-                        logger.debug(f"📤 发送初始状态: {connection_id}")
+                        logger.debug(f"发送初始状态: {connection_id}")
                 except Exception as e:
                     logger.error(f"获取初始状态失败: {e}")
 
@@ -101,7 +101,7 @@ class SSEManager:
             while True:
                 # 检查客户端是否断开
                 if await request.is_disconnected():
-                    logger.info(f"⚠️ 客户端已断开: {connection_id}")
+                    logger.info(f"客户端已断开: {connection_id}")
                     break
 
                 try:
@@ -125,16 +125,16 @@ class SSEManager:
                     })
 
         except asyncio.CancelledError:
-            logger.info(f"🔌 SSE连接被取消: {connection_id}")
+            logger.info(f"SSE连接被取消: {connection_id}")
         except Exception as e:
-            logger.error(f"❌ SSE错误: {connection_id} - {e}")
+            logger.error(f"SSE错误: {connection_id} - {e}")
         finally:
             # 清理连接
             try:
                 self.connections[channel_id].remove(event_queue)
                 if not self.connections[channel_id]:
                     del self.connections[channel_id]
-                logger.info(f"🔌 SSE连接已断开: {connection_id} (剩余连接: {self._get_total_active_connections()})")
+                logger.info(f"SSE连接已断开: {connection_id} (剩余连接: {self._get_total_active_connections()})")
             except (ValueError, KeyError):
                 pass
 
@@ -180,7 +180,7 @@ class SSEManager:
                 logger.error(f"广播失败: {channel_id} - {e}")
 
         if success_count > 0:
-            logger.debug(f"📤 广播完成: {channel_id} - {event} (成功: {success_count}, 失败: {failed_count})")
+            logger.debug(f"广播完成: {channel_id} - {event} (成功: {success_count}, 失败: {failed_count})")
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop):
         """
@@ -190,7 +190,7 @@ class SSEManager:
             loop: uvicorn/FastAPI 的主事件循环
         """
         self.loop = loop
-        logger.info("✅ SSE管理器已绑定主事件循环")
+        logger.info("SSE管理器已绑定主事件循环")
 
     def broadcast_sync(self, channel_id: str, event: str, data: dict):
         """

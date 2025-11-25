@@ -406,7 +406,7 @@ async function startJob() {
     // 如果有恢复信息，显示提示
     if (resumeInfo.value && resumeInfo.value.can_resume) {
       ElMessage.info({
-        message: `🔄 从断点继续（已完成 ${resumeInfo.value.processed_segments}/${resumeInfo.value.total_segments} 段）`,
+        message: `从断点继续（已完成 ${resumeInfo.value.processed_segments}/${resumeInfo.value.total_segments} 段）`,
         duration: 3000,
       });
     }
@@ -577,7 +577,7 @@ function connectSSE() {
 
   // 监听连接打开
   sseConnection.onopen = (e) => {
-    console.log('[SSE] ✅ 连接已打开', e);
+    console.log('[SSE] 连接已打开', e);
   };
 
   // 监听所有消息（调试用）
@@ -595,7 +595,7 @@ function connectSSE() {
   sseConnection.addEventListener('progress', (e) => {
     try {
       const data = JSON.parse(e.data);
-      console.log(`[SSE] ✅ 进度更新事件:`, data);
+      console.log(`[SSE] 进度更新事件:`, data);
 
       // 更新界面状态
       status.value = data.status;
@@ -921,7 +921,7 @@ async function startInitialPreload() {
         if (preloadResponse.ok) {
           const result = await preloadResponse.json();
           if (result.success) {
-            console.log("[App] ✅ 模型预加载已启动");
+            console.log("[App] 模型预加载已启动");
             // 使用 nextTick 确保组件完全初始化后再调用 ElMessage
             await new Promise((resolve) => setTimeout(resolve, 100));
             ElMessage.success("模型预加载已启动，可在右上角查看进度", {

@@ -277,7 +277,7 @@ async def stream_single_progress(model_type: str, model_id: str):
         heartbeat_counter = 0
 
         try:
-            logger.info(f"✅ 单模型SSE连接已建立: {model_type}/{model_id}")
+            logger.info(f"单模型SSE连接已建立: {model_type}/{model_id}")
 
             while True:
                 # 获取当前模型状态
@@ -330,7 +330,7 @@ async def stream_single_progress(model_type: str, model_id: str):
                 await asyncio.sleep(1)
 
         except asyncio.CancelledError:
-            logger.info(f"🔌 单模型SSE连接已关闭: {model_type}/{model_id}")
+            logger.info(f"单模型SSE连接已关闭: {model_type}/{model_id}")
             raise
 
     return StreamingResponse(

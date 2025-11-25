@@ -50,7 +50,7 @@ class FFmpegManager:
         # 首先检查项目目录中的FFmpeg
         if self.ffmpeg_exe.exists():
             if self._test_ffmpeg(str(self.ffmpeg_exe)):
-                self.logger.info(f"✅ 发现项目内FFmpeg: {self.ffmpeg_exe}")
+                self.logger.info(f"发现项目内FFmpeg: {self.ffmpeg_exe}")
                 return True, str(self.ffmpeg_exe)
             else:
                 self.logger.warning(f"⚠️ 项目内FFmpeg损坏: {self.ffmpeg_exe}")
@@ -58,7 +58,7 @@ class FFmpegManager:
 
         # 检查系统环境变量中的FFmpeg
         if self._test_ffmpeg("ffmpeg"):
-            self.logger.info("✅ 发现系统FFmpeg")
+            self.logger.info("发现系统FFmpeg")
             return True, "ffmpeg (系统环境变量)"
 
         # FFmpeg不可用
@@ -100,7 +100,7 @@ class FFmpegManager:
             return False
 
         self.download_attempts += 1
-        self.logger.info(f"🚀 开始下载FFmpeg (尝试 {self.download_attempts}/{self.MAX_DOWNLOAD_ATTEMPTS})...")
+        self.logger.info(f" 开始下载FFmpeg (尝试 {self.download_attempts}/{self.MAX_DOWNLOAD_ATTEMPTS})...")
 
         # 只在Windows平台下载
         if platform.system() != "Windows":
@@ -112,7 +112,7 @@ class FFmpegManager:
             self.logger.info(f"📥 尝试下载源 {idx}/{len(self.FFMPEG_DOWNLOAD_URLS)}: {url}")
             try:
                 if self._download_and_extract(url):
-                    self.logger.info("✅ FFmpeg下载成功")
+                    self.logger.info("FFmpeg下载成功")
                     return True
             except Exception as e:
                 self.logger.warning(f"⚠️ 下载源 {idx} 失败: {e}")
@@ -177,13 +177,13 @@ class FFmpegManager:
             for file in bin_dir.glob("*.exe"):
                 target = self.ffmpeg_dir / file.name
                 shutil.copy2(file, target)
-                self.logger.debug(f"✅ 复制: {file.name}")
+                self.logger.debug(f"复制: {file.name}")
 
             # 验证安装
             if not self._test_ffmpeg(str(self.ffmpeg_exe)):
                 raise Exception("FFmpeg安装验证失败")
 
-            self.logger.info("✅ FFmpeg安装成功")
+            self.logger.info("FFmpeg安装成功")
 
             # 清理临时文件
             self._cleanup_temp_files(temp_zip, temp_extract)
@@ -203,7 +203,7 @@ class FFmpegManager:
                 temp_zip.unlink()
             if temp_extract.exists():
                 shutil.rmtree(temp_extract)
-            self.logger.debug("🧹 临时文件已清理")
+            self.logger.debug("临时文件已清理")
         except Exception as e:
             self.logger.warning(f"⚠️ 清理临时文件失败: {e}")
 
@@ -240,7 +240,7 @@ class FFmpegManager:
             available, path = self.check_ffmpeg()
             if available:
                 print("\n" + "=" * 60)
-                print("✅ FFmpeg安装成功！")
+                print("FFmpeg安装成功！")
                 print(f"📁 安装位置: {path}")
                 print("=" * 60 + "\n")
                 return path

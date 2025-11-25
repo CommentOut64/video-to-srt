@@ -354,7 +354,7 @@ function startPolling() {
     } else {
       // 预加载完成，停止轮询
       if (wasPreloading) {
-        console.log('✅ 预加载已完成，停止轮询')
+        console.log('预加载已完成，停止轮询')
       }
       stopPolling()
     }

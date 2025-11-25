@@ -331,7 +331,7 @@ const statusIcon = computed(() => {
 
 // 智能轮询机制 - 只在状态变化时轮询
 function startSmartPolling() {
-  console.log("🔄 启动智能轮询（仅在状态变化时）");
+  console.log("启动智能轮询（仅在状态变化时）");
 
   const poll = async () => {
     try {
@@ -345,7 +345,7 @@ function startSmartPolling() {
       } else {
         // 预加载完成，停止轮询
         if (wasPreloading) {
-          console.log("✅ 预加载已完成，停止轮询");
+          console.log("预加载已完成，停止轮询");
         }
         stopSmartPolling();
       }
@@ -448,7 +448,7 @@ watch(showDialog, (newVal) => {
 // 简化的状态更新方法 - 单一数据源
 async function updateModelStatus() {
   try {
-    console.log("🔄 更新模型状态");
+    console.log("更新模型状态");
 
     const [preloadRes, cacheRes] = await Promise.all([
       modelAPI.getPreloadStatus(),
@@ -470,7 +470,7 @@ async function updateModelStatus() {
       
       // 状态变化日志
       if (wasPreloading !== isNowPreloading) {
-        console.log(isNowPreloading ? "🚀 预加载开始" : "✅ 预加载完成");
+        console.log(isNowPreloading ? " 预加载开始" : "预加载完成");
         statusChanged = true;
       } else if (isNowPreloading && progressChanged) {
         console.log(`📊 预加载进度: ${Math.round(newStatus.progress)}%`);
@@ -482,7 +482,7 @@ async function updateModelStatus() {
     if (cacheRes.success) {
       // 检测缓存版本变化
       if (cacheRes.data.cache_version !== lastCacheVersion) {
-        console.log("💾 缓存状态已更新");
+        console.log("缓存状态已更新");
         lastCacheVersion = cacheRes.data.cache_version;
         statusChanged = true;
       }
@@ -498,7 +498,7 @@ async function updateModelStatus() {
 
 async function startPreload() {
   try {
-    console.log("🚀 用户点击启动预加载");
+    console.log(" 用户点击启动预加载");
 
     // 检查当前状态
     if (modelStatus.is_preloading) {
@@ -519,12 +519,12 @@ async function startPreload() {
       ElMessage.success("模型预加载已启动");
 
       // 立即更新状态
-      console.log("🔄 立即更新状态检查预加载启动情况");
+      console.log("立即更新状态检查预加载启动情况");
       await updateModelStatus();
 
       // 如果检测到正在预加载，启动智能轮询
       if (modelStatus.is_preloading) {
-        console.log("✅ 检测到预加载已启动，开始智能轮询");
+        console.log("检测到预加载已启动，开始智能轮询");
         startSmartPolling();
       } else {
         console.log("⚠️ 未检测到预加载状态，延迟重试检查");
@@ -638,7 +638,7 @@ async function resetPreloadAttempts() {
 
 // 手动强制更新状态
 async function forceUpdate() {
-  console.log("🔄 手动触发状态更新");
+  console.log("手动触发状态更新");
   await updateModelStatus();
   ElMessage.info("状态已刷新");
 }
@@ -680,7 +680,7 @@ onMounted(async () => {
     () => modelStatus.is_preloading,
     (newVal, oldVal) => {
       if (newVal !== oldVal) {
-        console.log(`🔄 预加载状态变化: ${oldVal} -> ${newVal}`);
+        console.log(`预加载状态变化: ${oldVal} -> ${newVal}`);
         if (!newVal && oldVal) {
           // 从预加载中变为非预加载，说明完成了
           ElMessage.success(`模型预加载完成！已加载 ${modelStatus.loaded_models} 个模型`);
@@ -699,14 +699,14 @@ onMounted(async () => {
   );
 
   // 初始状态检查：只检查一次，如果正在预加载才启动轮询
-  console.log("🚀 执行初始状态检查");
+  console.log(" 执行初始状态检查");
   await updateModelStatus();
 
   if (modelStatus.is_preloading) {
-    console.log("✅ 检测到正在预加载，启动智能轮询");
+    console.log("检测到正在预加载，启动智能轮询");
     startSmartPolling();
   } else {
-    console.log("✅ 模型状态稳定，无需启动轮询");
+    console.log("模型状态稳定，无需启动轮询");
   }
 });
 

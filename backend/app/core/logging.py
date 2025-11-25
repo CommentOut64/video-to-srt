@@ -1,5 +1,6 @@
 """
-简单的日志配置
+统一的日志系统配置
+支持毫秒精度的时间戳和统一的日志格式
 """
 
 import logging
@@ -8,32 +9,87 @@ from pathlib import Path
 from core.config import config
 
 
+class MillisecondFormatter(logging.Formatter):
+    """包含毫秒精度的日志格式化器"""
+
+    def format(self, record):
+        # 时间戳：精确到毫秒
+        import datetime
+        ct = datetime.datetime.fromtimestamp(record.created)
+        timestamp = ct.strftime('%H:%M:%S') + '.%03d' % (record.msecs)
+
+        # 提取日志来源（模块名）
+        logger_name = record.name.split('.')[-1]
+
+        # 统一格式：时间戳 [级别] [来源] 信息
+        return f"{timestamp} [{record.levelname}] [{logger_name}] {record.getMessage()}"
+
+
+class ThirdPartyFilter(logging.Filter):
+    """过滤第三方库的多余日志"""
+
+    # 需要完全禁止的日志
+    BLOCKED_MESSAGES = [
+        "No language specified, language will be first be detected",
+        "Performing voice activity detection using Pyannote",
+        "Lightning automatically upgraded your loaded checkpoint",
+        "Model was trained with pyannote.audio",
+        "Model was trained with torch",
+        "TensorFloat-32 (TF32) has been disabled",
+        "No active speech found in audio",
+        "Warning: audio is shorter than 30s, language detection may be inaccurate",
+        "Using `TRANSFORMERS_CACHE` is deprecated",
+        "ReproducibilityWarning",
+        "FutureWarning"
+    ]
+
+    def filter(self, record):
+        msg = record.getMessage()
+        # 检查是否是被阻止的消息
+        for blocked in self.BLOCKED_MESSAGES:
+            if blocked in msg:
+                return False
+        return True
+
+
 def setup_logging():
     """配置日志系统"""
 
-    # 配置格式
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    date_format = '%Y-%m-%d %H:%M:%S'
+    # 创建根日志处理器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, config.LOG_LEVEL))
 
-    # 配置日志
-    logging.basicConfig(
-        level=getattr(logging, config.LOG_LEVEL),
-        format=log_format,
-        datefmt=date_format,
-        handlers=[
-            # 控制台输出
-            logging.StreamHandler(sys.stdout),
-            # 文件输出
-            logging.FileHandler(config.LOG_FILE, encoding='utf-8')
-        ]
-    )
+    # 清除已有的处理器
+    root_logger.handlers.clear()
 
-    # 设置第三方库日志级别
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('multipart').setLevel(logging.WARNING)
+    # 创建格式化器
+    formatter = MillisecondFormatter()
+
+    # 控制台输出
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.addFilter(ThirdPartyFilter())
+    root_logger.addHandler(console_handler)
+
+    # 文件输出
+    file_handler = logging.FileHandler(config.LOG_FILE, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    file_handler.addFilter(ThirdPartyFilter())
+    root_logger.addHandler(file_handler)
+
+    # 设置第三方库日志级别为WARNING
+    third_party_loggers = [
+        'urllib3', 'multipart', 'transformers', 'whisperx',
+        'silero', 'torch', 'pytorch_lightning', 'pyannote',
+        'speechbrain', 'whisper'
+    ]
+
+    for logger_name in third_party_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+        logging.getLogger(logger_name).addFilter(ThirdPartyFilter())
 
     logger = logging.getLogger(__name__)
-    logger.info(f"📝 日志系统已初始化 - 级别: {config.LOG_LEVEL}")
-    logger.info(f"📄 日志文件: {config.LOG_FILE}")
+    logger.info(f"Logging system initialized - level: {config.LOG_LEVEL}")
+    logger.info(f"Log file: {config.LOG_FILE}")
 
     return logger

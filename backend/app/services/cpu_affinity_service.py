@@ -160,7 +160,7 @@ class CPUAffinityManager:
             # 记录成功信息
             sys_info = self.get_system_info()
             self.logger.info(
-                f"✅ CPU亲和性设置成功: "
+                f"CPU亲和性设置成功: "
                 f"策略={config.strategy}, "
                 f"绑定核心={target_cores}, "
                 f"系统核心数={sys_info.get('logical_cores', '?')}"
@@ -183,7 +183,7 @@ class CPUAffinityManager:
 
         try:
             psutil.Process().cpu_affinity(self.original_affinity)
-            self.logger.info(f"🔄 已恢复CPU亲和性设置: {self.original_affinity}")
+            self.logger.info(f"已恢复CPU亲和性设置: {self.original_affinity}")
             return True
         except Exception as e:
             self.logger.error(f"❌ 恢复CPU亲和性失败: {e}")

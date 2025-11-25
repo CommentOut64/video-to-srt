@@ -106,84 +106,86 @@ export const useModelStore = defineStore('model', () => {
   function connectSSE() {
     // 如果已有连接，直接返回
     if (eventSource) {
-      console.log('[ModelStore] SSE连接已存在，跳过创建')
-      return
+      console.log("[ModelStore] SSE连接已存在，跳过创建");
+      return;
     }
 
-    console.log('[ModelStore] 建立全局SSE连接...')
-    eventSource = ModelManagerService.createProgressSSE()
+    console.log("[ModelStore] 建立全局SSE连接...");
+    eventSource = ModelManagerService.createProgressSSE();
 
     // 连接打开
     eventSource.onopen = () => {
-      console.log('[ModelStore] ✅ SSE连接已建立')
-      sseConnected.value = true
-    }
+      console.log("[ModelStore] SSE连接已建立");
+      sseConnected.value = true;
+    };
 
     // 监听初始状态
-    eventSource.addEventListener('initial_state', (e) => {
-      const data = JSON.parse(e.data)
-      console.log('[ModelStore] 收到初始状态:', data)
+    eventSource.addEventListener("initial_state", (e) => {
+      const data = JSON.parse(e.data);
+      console.log("[ModelStore] 收到初始状态:", data);
 
       // 更新Whisper模型状态
       if (data.whisper) {
         Object.entries(data.whisper).forEach(([modelId, state]) => {
-          updateModelProgress('whisper', modelId, state.progress, state.status)
-        })
+          updateModelProgress("whisper", modelId, state.progress, state.status);
+        });
       }
 
       // 更新对齐模型状态
       if (data.align) {
         Object.entries(data.align).forEach(([lang, state]) => {
-          updateModelProgress('align', lang, state.progress, state.status)
-        })
+          updateModelProgress("align", lang, state.progress, state.status);
+        });
       }
-    })
+    });
 
     // 监听进度更新
-    eventSource.addEventListener('model_progress', (e) => {
-      const data = JSON.parse(e.data)
-      console.log('[ModelStore] 进度更新:', data)
-      updateModelProgress(data.type, data.model_id, data.progress, data.status)
-    })
+    eventSource.addEventListener("model_progress", (e) => {
+      const data = JSON.parse(e.data);
+      console.log("[ModelStore] 进度更新:", data);
+      updateModelProgress(data.type, data.model_id, data.progress, data.status);
+    });
 
     // 监听下载完成
-    eventSource.addEventListener('model_complete', (e) => {
-      const data = JSON.parse(e.data)
-      console.log('[ModelStore] 下载完成:', data)
-      updateModelProgress(data.type, data.model_id, 100, 'ready')
-      ElMessage.success(`模型 ${data.model_id} 下载完成！`)
-    })
+    eventSource.addEventListener("model_complete", (e) => {
+      const data = JSON.parse(e.data);
+      console.log("[ModelStore] 下载完成:", data);
+      updateModelProgress(data.type, data.model_id, 100, "ready");
+      ElMessage.success(`模型 ${data.model_id} 下载完成！`);
+    });
 
     // 监听下载失败
-    eventSource.addEventListener('model_error', (e) => {
-      const data = JSON.parse(e.data)
-      console.log('[ModelStore] 下载失败:', data)
-      updateModelProgress(data.type, data.model_id, 0, 'error')
-      ElMessage.error(`模型 ${data.model_id} 下载失败：${data.message || '未知错误'}`)
-    })
+    eventSource.addEventListener("model_error", (e) => {
+      const data = JSON.parse(e.data);
+      console.log("[ModelStore] 下载失败:", data);
+      updateModelProgress(data.type, data.model_id, 0, "error");
+      ElMessage.error(
+        `模型 ${data.model_id} 下载失败：${data.message || "未知错误"}`
+      );
+    });
 
     // 监听模型不完整
-    eventSource.addEventListener('model_incomplete', (e) => {
-      const data = JSON.parse(e.data)
-      console.log('[ModelStore] 模型不完整:', data)
-      updateModelProgress(data.type, data.model_id, 0, 'incomplete')
+    eventSource.addEventListener("model_incomplete", (e) => {
+      const data = JSON.parse(e.data);
+      console.log("[ModelStore] 模型不完整:", data);
+      updateModelProgress(data.type, data.model_id, 0, "incomplete");
       ElMessage.warning({
         message: `模型 ${data.model_id} 文件不完整，请重新下载`,
-        duration: 5000
-      })
-    })
+        duration: 5000,
+      });
+    });
 
     // 监听心跳
-    eventSource.addEventListener('heartbeat', (e) => {
+    eventSource.addEventListener("heartbeat", (e) => {
       // 心跳不打印日志，避免刷屏
-    })
+    });
 
     // 监听连接错误
     eventSource.onerror = (error) => {
-      console.error('[ModelStore] SSE连接错误:', error)
-      sseConnected.value = false
+      console.error("[ModelStore] SSE连接错误:", error);
+      sseConnected.value = false;
       // SSE会自动重连，无需手动处理
-    }
+    };
   }
 
   /**
@@ -191,10 +193,10 @@ export const useModelStore = defineStore('model', () => {
    */
   function disconnectSSE() {
     if (eventSource) {
-      eventSource.close()
-      eventSource = null
-      sseConnected.value = false
-      console.log('[ModelStore] 🔌 SSE连接已断开')
+      eventSource.close();
+      eventSource = null;
+      sseConnected.value = false;
+      console.log("[ModelStore] SSE连接已断开");
     }
   }
 
@@ -203,11 +205,11 @@ export const useModelStore = defineStore('model', () => {
    */
   async function downloadWhisperModel(modelId) {
     try {
-      await ModelManagerService.downloadWhisperModel(modelId)
-      ElMessage.success(`开始下载模型 ${modelId}`)
+      await ModelManagerService.downloadWhisperModel(modelId);
+      ElMessage.success(`开始下载模型 ${modelId}`);
     } catch (error) {
-      console.error(`[ModelStore] 下载模型失败: ${modelId}`, error)
-      throw error
+      console.error(`[ModelStore] 下载模型失败: ${modelId}`, error);
+      throw error;
     }
   }
 
@@ -216,11 +218,11 @@ export const useModelStore = defineStore('model', () => {
    */
   async function downloadAlignModel(language) {
     try {
-      await ModelManagerService.downloadAlignModel(language)
-      ElMessage.success(`开始下载对齐模型 ${language}`)
+      await ModelManagerService.downloadAlignModel(language);
+      ElMessage.success(`开始下载对齐模型 ${language}`);
     } catch (error) {
-      console.error(`[ModelStore] 下载对齐模型失败: ${language}`, error)
-      throw error
+      console.error(`[ModelStore] 下载对齐模型失败: ${language}`, error);
+      throw error;
     }
   }
 
@@ -229,13 +231,13 @@ export const useModelStore = defineStore('model', () => {
    */
   async function deleteWhisperModel(modelId) {
     try {
-      await ModelManagerService.deleteWhisperModel(modelId)
-      ElMessage.success(`模型 ${modelId} 已删除`)
+      await ModelManagerService.deleteWhisperModel(modelId);
+      ElMessage.success(`模型 ${modelId} 已删除`);
       // 重新加载列表
-      await loadModels()
+      await loadModels();
     } catch (error) {
-      console.error(`[ModelStore] 删除模型失败: ${modelId}`, error)
-      throw error
+      console.error(`[ModelStore] 删除模型失败: ${modelId}`, error);
+      throw error;
     }
   }
 
@@ -244,13 +246,13 @@ export const useModelStore = defineStore('model', () => {
    */
   async function deleteAlignModel(language) {
     try {
-      await ModelManagerService.deleteAlignModel(language)
-      ElMessage.success(`对齐模型 ${language} 已删除`)
+      await ModelManagerService.deleteAlignModel(language);
+      ElMessage.success(`对齐模型 ${language} 已删除`);
       // 重新加载列表
-      await loadModels()
+      await loadModels();
     } catch (error) {
-      console.error(`[ModelStore] 删除对齐模型失败: ${language}`, error)
-      throw error
+      console.error(`[ModelStore] 删除对齐模型失败: ${language}`, error);
+      throw error;
     }
   }
 
@@ -258,19 +260,19 @@ export const useModelStore = defineStore('model', () => {
    * 初始化（应用启动时调用一次）
    */
   async function initialize() {
-    console.log('[ModelStore] 🚀 初始化模型管理器...')
+    console.log("[ModelStore]  初始化模型管理器...");
 
     try {
       // 加载模型列表
-      await loadModels()
+      await loadModels();
 
       // 建立SSE连接
-      connectSSE()
+      connectSSE();
 
-      console.log('[ModelStore] ✅ 初始化完成')
+      console.log("[ModelStore] 初始化完成");
     } catch (error) {
-      console.error('[ModelStore] ❌ 初始化失败:', error)
-      throw error
+      console.error("[ModelStore] ❌ 初始化失败:", error);
+      throw error;
     }
   }
 

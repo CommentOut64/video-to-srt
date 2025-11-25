@@ -76,7 +76,7 @@ async def startup_event():
             from services.sse_service import get_sse_manager
             sse_manager = get_sse_manager()
             sse_manager.set_event_loop(current_loop)
-            logger.info("✅ 统一SSE管理器事件循环已设置")
+            logger.info("统一SSE管理器事件循环已设置")
 
         except Exception as e:
             logger.warning(f"设置SSE事件循环异常: {e}")
@@ -104,7 +104,7 @@ async def startup_event():
         from core.config import config
         transcription_service = get_transcription_service(str(config.JOBS_DIR))
         queue_service = get_queue_service(transcription_service)
-        logger.info("✅ 任务队列服务已启动")
+        logger.info("任务队列服务已启动")
 
         # 不在启动时预加载模型，等待前端就绪后通过API调用
         logger.info("后端服务已就绪，等待前端启动后进行模型预加载")
@@ -126,7 +126,7 @@ async def shutdown_event():
         try:
             queue_service = get_queue_service()
             queue_service.shutdown()
-            logger.info("✅ 任务队列服务已停止")
+            logger.info("任务队列服务已停止")
         except:
             pass
 
@@ -383,19 +383,19 @@ async def get_models_cache_status():
 async def start_models_preload():
     """手动启动模型预加载 - 简化版本，实现真正的幂等性"""
     try:
-        logger.info("🚀 收到模型预加载请求")
+        logger.info("收到模型预加载请求")
 
         # 检查模型管理器
         model_manager = get_model_manager()
         if not model_manager:
-            logger.error("❌ 模型管理器未初始化")
+            logger.error("模型管理器未初始化")
             return {"success": False, "message": "模型管理器未初始化"}
 
         # 直接调用模型管理器的预加载方法 - 它已经实现了幂等性
         result = await model_manager.preload_models()
         
         if result["success"]:
-            logger.info(f"✅ 模型预加载成功: {result.get('loaded_models', 0)}/{result.get('total_models', 0)} 个模型")
+            logger.info(f"模型预加载成功: {result.get('loaded_models', 0)}/{result.get('total_models', 0)} 个模型")
             return {
                 "success": True,
                 "message": "预加载已启动",
@@ -403,7 +403,7 @@ async def start_models_preload():
                 "total_models": result.get("total_models", 0)
             }
         else:
-            logger.warning(f"⚠️ 模型预加载未成功: {result.get('message', 'Unknown error')}")
+            logger.warning(f"模型预加载未成功: {result.get('message', 'Unknown error')}")
             return {
                 "success": False,
                 "message": result.get("message", "预加载失败"),
@@ -411,7 +411,7 @@ async def start_models_preload():
             }
 
     except Exception as e:
-        logger.error(f"❌ 模型预加载异常: {str(e)}", exc_info=True)
+        logger.error(f"模型预加载异常: {str(e)}", exc_info=True)
         return {"success": False, "message": f"启动预加载失败: {str(e)}"}
 
 @app.post("/api/models/cache/clear")
@@ -423,7 +423,7 @@ async def clear_models_cache():
         
         if model_manager:
             model_manager.clear_cache()
-            logger.info("✅ 手动清空模型缓存成功")
+            logger.info("手动清空模型缓存成功")
             return {
                 "success": True,
                 "message": "模型缓存已清空",
@@ -436,7 +436,7 @@ async def clear_models_cache():
             }
             
     except Exception as e:
-        logger.error(f"❌ 清空模型缓存失败: {str(e)}", exc_info=True)
+        logger.error(f"清空模型缓存失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"清空缓存失败: {str(e)}"
@@ -462,7 +462,7 @@ async def reset_preload_attempts():
                 "message": "模型管理器未初始化"
             }
     except Exception as e:
-        logger.error(f"❌ 重置预加载失败计数失败: {str(e)}", exc_info=True)
+        logger.error(f"重置预加载失败计数失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"重置失败: {str(e)}"
@@ -502,7 +502,7 @@ async def get_default_preload_config():
             }
         }
     except Exception as e:
-        logger.error(f"❌ 获取默认预加载配置失败: {str(e)}", exc_info=True)
+        logger.error(f"获取默认预加载配置失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"获取配置失败: {str(e)}"
@@ -520,7 +520,7 @@ async def set_default_preload_model(request: dict):
         success = user_config.set_default_preload_model(model_id)
 
         if success:
-            logger.info(f"✅ 设置默认预加载模型: {model_id}")
+            logger.info(f"设置默认预加载模型: {model_id}")
             return {
                 "success": True,
                 "message": f"默认预加载模型已设置为: {model_id or '自动选择'}"
@@ -531,7 +531,7 @@ async def set_default_preload_model(request: dict):
                 "message": "设置失败"
             }
     except Exception as e:
-        logger.error(f"❌ 设置默认预加载模型失败: {str(e)}", exc_info=True)
+        logger.error(f"设置默认预加载模型失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"设置失败: {str(e)}"
@@ -563,14 +563,14 @@ async def unload_model(request: dict):
             }
 
         preload_manager.evict_model(model_id, device, compute_type)
-        logger.info(f"✅ 卸载模型: {model_id}")
+        logger.info(f"卸载模型: {model_id}")
 
         return {
             "success": True,
             "message": f"模型 {model_id} 已卸载"
         }
     except Exception as e:
-        logger.error(f"❌ 卸载模型失败: {str(e)}", exc_info=True)
+        logger.error(f"卸载模型失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"卸载失败: {str(e)}"
@@ -619,7 +619,7 @@ async def load_specific_model(request: dict):
         )
 
         # 加载模型
-        logger.info(f"🔄 开始加载模型: {model_id}")
+        logger.info(f"开始加载模型: {model_id}")
         model = await asyncio.get_event_loop().run_in_executor(
             None,
             preload_manager.get_model,
@@ -627,7 +627,7 @@ async def load_specific_model(request: dict):
         )
 
         if model:
-            logger.info(f"✅ 模型加载成功: {model_id}")
+            logger.info(f"模型加载成功: {model_id}")
             return {
                 "success": True,
                 "message": f"模型 {model_id} 加载成功"
@@ -638,7 +638,7 @@ async def load_specific_model(request: dict):
                 "message": "模型加载失败"
             }
     except Exception as e:
-        logger.error(f"❌ 加载模型失败: {str(e)}", exc_info=True)
+        logger.error(f"加载模型失败: {str(e)}", exc_info=True)
         return {
             "success": False,
             "message": f"加载失败: {str(e)}"

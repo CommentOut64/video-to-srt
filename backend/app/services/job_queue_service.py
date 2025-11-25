@@ -191,7 +191,7 @@ class JobQueueService:
         3. 清理资源
         4. 循环
         """
-        logger.info("🔄 Worker循环已启动")
+        logger.info("Worker循环已启动")
 
         while not self.stop_event.is_set():
             try:
@@ -233,7 +233,7 @@ class JobQueueService:
 
                 # 3. 执行任务（阻塞，直到完成/失败/暂停/取消）
                 job = self.jobs[self.running_job_id]
-                logger.info(f"🚀 开始执行任务: {self.running_job_id}")
+                logger.info(f" 开始执行任务: {self.running_job_id}")
 
                 try:
                     # 调用原有的转录流程（会阻塞到任务结束）
@@ -249,7 +249,7 @@ class JobQueueService:
                     else:
                         job.status = "finished"
                         job.message = "完成"
-                        logger.info(f"✅ 任务完成: {self.running_job_id}")
+                        logger.info(f"任务完成: {self.running_job_id}")
 
                 except Exception as e:
                     job.status = "failed"
@@ -302,7 +302,7 @@ class JobQueueService:
         2. 保留最近使用的3个对齐模型（LRU，共~600MB）
         3. GC + CUDA 清理
         """
-        logger.info("🧹 开始资源清理（增强版）...")
+        logger.info("开始资源清理（增强版）...")
 
         # 1. 清空 Whisper 模型缓存
         try:

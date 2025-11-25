@@ -107,18 +107,18 @@ class TranscriptionService:
         # 集成SSE管理器（用于实时进度推送）
         from services.sse_service import get_sse_manager
         self.sse_manager = get_sse_manager()
-        self.logger.info("✅ SSE管理器已集成")
+        self.logger.info("SSE管理器已集成")
 
         # 记录CPU信息
         sys_info = self.cpu_manager.get_system_info()
         if sys_info.get('supported', False):
             self.logger.info(
-                f"💻 CPU信息: {sys_info['logical_cores']}个逻辑核心, "
+                f" CPU信息: {sys_info['logical_cores']}个逻辑核心, "
                 f"{sys_info.get('physical_cores', '?')}个物理核心, "
                 f"平台: {sys_info.get('platform', '?')}"
             )
         else:
-            self.logger.warning("⚠️ CPU亲和性功能不可用")
+            self.logger.warning("CPU亲和性功能不可用")
 
         # 执行硬件检测
         self._detect_hardware()
@@ -133,7 +133,7 @@ class TranscriptionService:
             # 记录检测结果
             hw = self._hardware_info
             opt = self._optimization_config
-            self.logger.info(f"硬件检测完成 - GPU: {'✓' if hw.cuda_available else '✗'}, "
+            self.logger.info(f"硬件检测完成GPU: {'' if hw.cuda_available else ''}, "
                            f"CPU: {hw.cpu_cores}核/{hw.cpu_threads}线程, "
                            f"内存: {hw.memory_total_mb}MB, "
                            f"优化配置: batch={opt.batch_size}, device={opt.recommended_device}")
@@ -215,7 +215,7 @@ class TranscriptionService:
         # 添加文件路径到任务ID的映射
         self.job_index.add_mapping(src_path, job_id)
 
-        self.logger.info(f"✅ 任务已创建: {job_id} - {filename}")
+        self.logger.info(f"任务已创建: {job_id} - {filename}")
         return job
 
     def get_job(self, job_id: str) -> Optional[JobState]:
@@ -354,7 +354,7 @@ class TranscriptionService:
             with self.lock:
                 self.jobs[job_id] = job
 
-            self.logger.info(f"✅ 从检查点恢复任务: {job_id}")
+            self.logger.info(f"从检查点恢复任务: {job_id}")
             return job
 
         except Exception as e:
@@ -415,7 +415,7 @@ class TranscriptionService:
         Args:
             job_id: 任务ID
         """
-        # 🔥 关键改动: 不再自动创建线程，由队列服务统一管理
+        #  关键改动: 不再自动创建线程，由队列服务统一管理
         # 原有代码:
         # threading.Thread(target=self._run_pipeline, args=(job,), daemon=True).start()
 
@@ -434,7 +434,7 @@ class TranscriptionService:
         job.error = None
         # 状态由队列服务设置，这里不改
 
-        self.logger.warning(f"⚠️ start_job已废弃，请使用队列服务: {job_id}")
+        self.logger.warning(f"start_job已废弃，请使用队列服务: {job_id}")
 
     def pause_job(self, job_id: str) -> bool:
         """
@@ -485,7 +485,7 @@ class TranscriptionService:
                 if job_dir.exists():
                     # 删除整个任务目录
                     shutil.rmtree(job_dir)
-                    self.logger.info(f"🗑️ 已删除任务数据: {job_id}")
+                    self.logger.info(f"已删除任务数据: {job_id}")
                     # 从内存中移除任务
                     with self.lock:
                         if job_id in self.jobs:
@@ -624,7 +624,7 @@ class TranscriptionService:
                     }
                 }
             )
-            self.logger.debug(f"📤 推送segment #{segment_result.get('segment_index', 0)} 转录结果")
+            self.logger.debug(f"推送segment #{segment_result.get('segment_index', 0)} 转录结果")
         except Exception as e:
             # SSE推送失败不应影响转录流程
             self.logger.debug(f"SSE segment推送失败（非致命）: {e}")
@@ -660,7 +660,7 @@ class TranscriptionService:
                     "message": "对齐完成"
                 }
             )
-            self.logger.info(f"📤 推送对齐完成事件，共 {len(segments)} 条字幕")
+            self.logger.info(f"推送对齐完成事件，共 {len(segments)} 条字幕")
         except Exception as e:
             # SSE推送失败不应影响转录流程
             self.logger.debug(f"SSE aligned推送失败（非致命）: {e}")
@@ -813,7 +813,7 @@ class TranscriptionService:
             current_segments = []
 
             if checkpoint:
-                self.logger.info(f"🔄 发现检查点，从 {checkpoint.get('phase', 'unknown')} 阶段恢复")
+                self.logger.info(f"发现检查点，从 {checkpoint.get('phase', 'unknown')} 阶段恢复")
                 # 恢复数据到内存
                 processed_indices = set(checkpoint.get('processed_indices', []))
 
@@ -821,10 +821,10 @@ class TranscriptionService:
                 if 'unaligned_results' in checkpoint:
                     # 新格式：unaligned_results字段
                     unaligned_results = checkpoint.get('unaligned_results', [])
-                    self.logger.info("✅ 检测到新格式checkpoint（未对齐结果）")
+                    self.logger.info("检测到新格式checkpoint（未对齐结果）")
                 elif 'results' in checkpoint:
                     # 旧格式：results字段（已对齐）
-                    self.logger.warning("⚠️ 检测到旧版checkpoint格式，将直接使用已对齐结果")
+                    self.logger.warning("检测到旧版checkpoint格式，将直接使用已对齐结果")
                     # 将旧格式转换为新格式（跳过对齐阶段）
                     # 这种情况下我们直接使用results作为最终结果
                     pass
@@ -833,7 +833,7 @@ class TranscriptionService:
                 # 恢复任务基本信息
                 job.total = checkpoint.get('total_segments', 0)
                 job.processed = len(processed_indices)
-                self.logger.info(f"📊 已处理 {job.processed}/{job.total} 段")
+                self.logger.info(f"已处理 {job.processed}/{job.total} 段")
 
             # ==========================================
             # 2. 阶段1: 提取音频
@@ -849,7 +849,7 @@ class TranscriptionService:
 
                 self._update_progress(job, 'extract', 1, '音频提取完成')
             else:
-                self.logger.info("✅ 跳过音频提取，使用已有文件")
+                self.logger.info("跳过音频提取，使用已有文件")
 
             if job.canceled:
                 raise RuntimeError('任务已取消')
@@ -864,12 +864,12 @@ class TranscriptionService:
             if checkpoint and 'processing_mode' in checkpoint:
                 mode_value = checkpoint['processing_mode']
                 processing_mode = ProcessingMode(mode_value)
-                self.logger.info(f"🔄 从检查点恢复处理模式: {processing_mode.value}")
+                self.logger.info(f"从检查点恢复处理模式: {processing_mode.value}")
 
             # 如果没有检查点或没有模式信息，进行智能决策
             if processing_mode is None:
                 processing_mode = self._decide_processing_mode(str(audio_path), job)
-                self.logger.info(f"💡 智能选择处理模式: {processing_mode.value}")
+                self.logger.info(f"智能选择处理模式: {processing_mode.value}")
 
             # ==========================================
             # 4. 阶段1.6: 音频加载（内存模式）
@@ -878,10 +878,10 @@ class TranscriptionService:
                 # 内存模式：尝试加载完整音频到内存
                 try:
                     audio_array = self._safe_load_audio(str(audio_path), job)
-                    self.logger.info("✅ 音频已加载到内存（内存模式）")
+                    self.logger.info("音频已加载到内存（内存模式）")
                 except RuntimeError as e:
                     # 加载失败，降级到硬盘模式
-                    self.logger.warning(f"⚠️ 内存加载失败，降级到硬盘模式: {e}")
+                    self.logger.warning(f"内存加载失败，降级到硬盘模式: {e}")
                     processing_mode = ProcessingMode.DISK
                     audio_array = None
 
@@ -921,9 +921,9 @@ class TranscriptionService:
                     current_segments,
                     processing_mode
                 )
-                self.logger.info("💾 检查点已强制刷新: 分段完成")
+                self.logger.info("检查点已强制刷新: 分段完成")
             else:
-                self.logger.info(f"✅ 跳过分段，使用检查点数据（共{len(current_segments)}段）")
+                self.logger.info(f"跳过分段，使用检查点数据（共{len(current_segments)}段）")
                 job.segments = current_segments  # 恢复到 job 对象
                 job.total = len(current_segments)
 
@@ -942,8 +942,8 @@ class TranscriptionService:
                 if i not in processed_indices
             ]
 
-            self.logger.info(f"📝 剩余 {len(todo_segments)}/{len(current_segments)} 段需要转录")
-            self.logger.info(f"🎯 处理模式: {processing_mode.value}")
+            self.logger.info(f"剩余 {len(todo_segments)}/{len(current_segments)} 段需要转录")
+            self.logger.info(f"处理模式: {processing_mode.value}")
 
             for idx, seg in enumerate(current_segments):
                 # 如果已经在 processed_indices 里，直接跳过
@@ -1014,7 +1014,7 @@ class TranscriptionService:
                     "unaligned_results": unaligned_results  # 保存未对齐结果
                 }
                 self._save_checkpoint(job_dir, checkpoint_data, job)
-                self.logger.debug(f"💾 检查点已保存: {len(processed_indices)}/{len(current_segments)}")
+                self.logger.debug(f"检查点已保存: {len(processed_indices)}/{len(current_segments)}")
 
             self._update_progress(job, 'transcribe', 1, '转录完成')
             if job.canceled:
@@ -1029,11 +1029,11 @@ class TranscriptionService:
             if processing_mode == ProcessingMode.MEMORY and audio_array is not None:
                 # 内存模式：复用内存数组（避免重新加载）
                 audio_source = audio_array
-                self.logger.info("🚀 对齐阶段：复用内存音频数组")
+                self.logger.info("对齐阶段：复用内存音频数组")
             else:
                 # 硬盘模式：传递音频文件路径
                 audio_source = str(audio_path)
-                self.logger.info("🚀 对齐阶段：从磁盘加载音频")
+                self.logger.info("对齐阶段：从磁盘加载音频")
 
             # 使用批次对齐方法（支持SSE进度推送）
             aligned_results = self._align_all_results_batched(
@@ -1068,7 +1068,7 @@ class TranscriptionService:
             try:
                 checkpoint_file = job_dir / "checkpoint.json"
                 checkpoint_file.unlink(missing_ok=True)
-                self.logger.info("🧹 检查点已清理")
+                self.logger.info("检查点已清理")
             except Exception as e:
                 self.logger.warning(f"清理检查点失败: {e}")
 
@@ -1080,7 +1080,7 @@ class TranscriptionService:
             else:
                 job.status = 'finished'
                 job.message = '完成'
-                self.logger.info(f"✅ 任务完成: {job.job_id}")
+                self.logger.info(f"任务完成: {job.job_id}")
                 # 推送完成信号
                 self._push_sse_signal(job, "job_complete", "转录完成")
 
@@ -1101,7 +1101,7 @@ class TranscriptionService:
                 job.status = 'failed'
                 job.message = f'失败: {e}'
                 job.error = str(e)
-                self.logger.error(f"❌ 任务失败: {job.job_id} - {e}", exc_info=True)
+                self.logger.error(f"任务失败: {job.job_id} - {e}", exc_info=True)
                 # 推送失败信号
                 self._push_sse_signal(job, "job_failed", f"任务失败: {e}")
 
@@ -1110,7 +1110,7 @@ class TranscriptionService:
             if cpu_applied:
                 restored = self.cpu_manager.restore_cpu_affinity()
                 if restored:
-                    self.logger.info(f"🔄 任务 {job.job_id} 已恢复CPU亲和性设置")
+                    self.logger.info(f"任务 {job.job_id} 已恢复CPU亲和性设置")
 
             # 释放内存
             gc.collect()
@@ -1184,20 +1184,20 @@ class TranscriptionService:
         safety_reserve_mb = max(total_mb * 0.2, 2048)
         usable_mb = available_mb - safety_reserve_mb
 
-        self.logger.info(f"📊 内存评估:")
-        self.logger.info(f"   音频时长: {audio_duration_sec/60:.1f}分钟")
-        self.logger.info(f"   预估需求: {total_estimated_mb:.0f}MB")
-        self.logger.info(f"   可用内存: {available_mb:.0f}MB")
-        self.logger.info(f"   安全余量: {safety_reserve_mb:.0f}MB")
-        self.logger.info(f"   可用于处理: {usable_mb:.0f}MB")
+        self.logger.info(f"内存评估:")
+        self.logger.info(f"音频时长: {audio_duration_sec/60:.1f}分钟")
+        self.logger.info(f"预估需求: {total_estimated_mb:.0f}MB")
+        self.logger.info(f"可用内存: {available_mb:.0f}MB")
+        self.logger.info(f"安全余量: {safety_reserve_mb:.0f}MB")
+        self.logger.info(f"可用于处理: {usable_mb:.0f}MB")
 
         # 决策
         if usable_mb >= total_estimated_mb:
-            self.logger.info("✅ 选择【内存模式】- 内存充足，使用高性能模式")
+            self.logger.info("选择【内存模式】- 内存充足，使用高性能模式")
             job.message = "内存充足，使用高性能模式"
             return ProcessingMode.MEMORY
         else:
-            self.logger.warning(f"⚠️ 选择【硬盘模式】- 内存不足（需要{total_estimated_mb:.0f}MB，可用{usable_mb:.0f}MB）")
+            self.logger.warning(f"选择【硬盘模式】- 内存不足（需要{total_estimated_mb:.0f}MB，可用{usable_mb:.0f}MB）")
             job.message = "内存受限，使用稳定模式"
             return ProcessingMode.DISK
 
@@ -1229,10 +1229,9 @@ class TranscriptionService:
             # 记录加载信息
             duration_sec = len(audio_array) / 16000
             memory_mb = audio_array.nbytes / (1024 * 1024)
-            self.logger.info(f"音频加载成功:")
-            self.logger.info(f"   时长: {duration_sec/60:.1f}分钟")
-            self.logger.info(f"   内存占用: {memory_mb:.1f}MB")
-            self.logger.info(f"   采样点数: {len(audio_array):,}")
+            # Audio loaded: {duration_sec/60:.1f}分钟")
+            self.logger.info(f"内存占用: {memory_mb:.1f}MB")
+            self.logger.info(f"采样点数: {len(audio_array):,}")
 
             return audio_array
 
@@ -1350,7 +1349,7 @@ class TranscriptionService:
             return_seconds=False  # 返回采样点而非秒数
         )
 
-        self.logger.info(f"Silero VAD检测到 {len(speech_timestamps)} 个语音段")
+        # VAD detection complete
 
         # 合并分段（确保每段不超过chunk_size秒）
         segments_metadata = []
@@ -1596,18 +1595,18 @@ class TranscriptionService:
             )
 
             if proc.returncode == 0 and os.path.exists(audio_out):
-                self.logger.debug(f"✅ 音频提取成功: {audio_out}")
+                self.logger.debug(f"音频提取成功: {audio_out}")
                 return True
             else:
                 error_msg = proc.stderr.decode('utf-8', errors='ignore')
-                self.logger.error(f"❌ FFmpeg执行失败: {error_msg}")
+                self.logger.error(f"FFmpeg执行失败: {error_msg}")
                 return False
 
         except subprocess.TimeoutExpired:
-            self.logger.error("❌ FFmpeg超时")
+            self.logger.error("FFmpeg超时")
             return False
         except Exception as e:
-            self.logger.error(f"❌ 音频提取失败: {e}")
+            self.logger.error(f"音频提取失败: {e}")
             return False
 
     def _split_audio_to_disk(self, audio_path: str) -> List[Dict]:
@@ -1647,7 +1646,7 @@ class TranscriptionService:
 
             # 智能寻找静音点（避免在句子中间分割）
             if end < length and (end - pos) > SILENCE_SEARCH_MS:
-                search_start = max(pos, end - SILENCE_SEARCH_MS)
+                search_start = max(pos, endSILENCE_SEARCH_MS)
                 search_chunk = audio[search_start:end]
 
                 try:
@@ -1715,7 +1714,7 @@ class TranscriptionService:
             if whisper_model_info:
                 # 检查模型状态
                 if whisper_model_info.status == "not_downloaded" or whisper_model_info.status == "incomplete":
-                    self.logger.warning(f"⚠️ Whisper模型未下载或不完整: {settings.model}")
+                    self.logger.warning(f"Whisper模型未下载或不完整: {settings.model}")
 
                     # 获取模型大小信息
                     model_size_mb = whisper_model_info.size_mb
@@ -1725,7 +1724,7 @@ class TranscriptionService:
                     if model_size_mb >= 1024:
                         size_gb = model_size_mb / 1024
                         download_msg = f"当前下载模型大于1GB ({size_gb:.1f}GB),请耐心等待"
-                        self.logger.info(f"📦 {download_msg}")
+                        self.logger.info(f"{download_msg}")
                     else:
                         download_msg = f"开始下载模型 {settings.model} ({model_size_mb}MB)"
 
@@ -1733,12 +1732,12 @@ class TranscriptionService:
                     if job:
                         job.message = download_msg
 
-                    self.logger.info(f"🚀 自动触发下载Whisper模型: {settings.model} ({model_size_mb}MB)")
+                    self.logger.info(f"自动触发下载Whisper模型: {settings.model} ({model_size_mb}MB)")
 
                     # 触发下载
                     success = model_mgr.download_whisper_model(settings.model)
                     if not success:
-                        self.logger.warning(f"⚠️ 模型管理器下载失败或已在下载中,回退到whisperx")
+                        self.logger.warning(f"模型管理器下载失败或已在下载中,回退到whisperx")
                         raise RuntimeError("模型管理器下载失败")
 
                     # 等待下载完成（最多等待10分钟）
@@ -1755,57 +1754,57 @@ class TranscriptionService:
                         progress = model_mgr.whisper_models[settings.model].download_progress
 
                         if current_status == "ready":
-                            self.logger.info(f"✅ Whisper模型下载完成: {settings.model}")
+                            self.logger.info(f"Whisper模型下载完成: {settings.model}")
                             if job:
                                 job.message = f"模型下载完成,准备加载"
                             break
                         elif current_status == "error":
-                            self.logger.error(f"❌ 模型管理器下载失败,回退到whisperx")
+                            self.logger.error(f"模型管理器下载失败,回退到whisperx")
                             raise RuntimeError(f"Whisper模型下载失败: {settings.model}")
                         else:
                             # 如果模型大小>=1GB,定期提醒用户耐心等待
                             if model_size_mb >= 1024 and elapsed % 30 == 0:  # 每30秒提醒一次
                                 wait_msg = f"当前下载模型大于1GB,请耐心等待... {progress:.1f}% ({elapsed}s/{max_wait_time}s)"
-                                self.logger.info(f"⏳ {wait_msg}")
+                                self.logger.info(f"{wait_msg}")
                                 if job:
                                     job.message = wait_msg
                             else:
                                 wait_msg = f"等待模型下载... {progress:.1f}%"
-                                self.logger.info(f"⏳ {wait_msg} ({elapsed}s/{max_wait_time}s)")
+                                self.logger.info(f"{wait_msg} ({elapsed}s/{max_wait_time}s)")
                                 # 更新任务状态(每次都更新,这样用户可以看到进度变化)
                                 if job:
                                     job.message = wait_msg
 
                     if elapsed >= max_wait_time:
-                        self.logger.error(f"❌ 模型下载超时,回退到whisperx")
+                        self.logger.error(f"模型下载超时,回退到whisperx")
                         raise TimeoutError(f"Whisper模型下载超时: {settings.model}")
 
         except Exception as e:
-            self.logger.warning(f"⚠️ 模型管理服务检查失败,回退到whisperx: {e}")
+            self.logger.warning(f"模型管理服务检查失败,回退到whisperx: {e}")
 
         # 尝试使用模型预加载管理器
         try:
             from services.model_preload_manager import get_model_manager as get_preload_manager
             model_manager = get_preload_manager()
             if model_manager:
-                self.logger.debug("✅ 使用模型预加载管理器获取模型")
+                self.logger.debug("使用模型预加载管理器获取模型")
                 if job:
                     job.message = "加载模型中"
                 return model_manager.get_model(settings)
         except Exception as e:
-            self.logger.debug(f"⚠️ 无法使用模型预加载管理器，回退到本地缓存: {e}")
+            self.logger.debug(f"无法使用模型预加载管理器，回退到本地缓存: {e}")
             pass
 
         # 回退到简单缓存机制
         key = (settings.model, settings.compute_type, settings.device)
         with _model_lock:
             if key in _model_cache:
-                self.logger.debug(f"✅ 命中模型缓存: {key}")
+                self.logger.debug(f"命中模型缓存: {key}")
                 if job:
                     job.message = "使用缓存的模型"
                 return _model_cache[key]
 
-            self.logger.info(f"🔍 加载模型: {key}")
+            self.logger.info(f"加载模型: {key}")
             if job:
                 job.message = f"加载模型 {settings.model}"
 
@@ -1824,7 +1823,7 @@ class TranscriptionService:
                     job.message = "模型加载完成"
                 return m
             except Exception as e:
-                self.logger.warning(f"⚠️ 本地加载失败,允许whisperx下载: {e}")
+                self.logger.warning(f"本地加载失败,允许whisperx下载: {e}")
                 if job:
                     job.message = "本地模型不存在,使用whisperx下载"
                 # 如果本地加载失败,允许whisperx下载
@@ -1864,7 +1863,7 @@ class TranscriptionService:
             if lang in _align_model_cache:
                 # 命中：移到末尾（最近使用）
                 _align_model_cache.move_to_end(lang)
-                self.logger.debug(f"✅ 命中对齐模型缓存: {lang} (缓存: {list(_align_model_cache.keys())})")
+                self.logger.debug(f"命中对齐模型缓存: {lang} (缓存: {list(_align_model_cache.keys())})")
                 if job:
                     job.message = "使用缓存的对齐模型"
                 return _align_model_cache[lang]
@@ -1873,7 +1872,7 @@ class TranscriptionService:
             if len(_align_model_cache) >= _MAX_ALIGN_MODELS:
                 # 缓存已满，删除最久未使用的（队首）
                 oldest_lang, (oldest_model, _) = _align_model_cache.popitem(last=False)
-                self.logger.info(f"🗑️ 淘汰最久未用的对齐模型: {oldest_lang} (为 {lang} 腾出空间)")
+                self.logger.info(f"淘汰最久未用的对齐模型: {oldest_lang} (为 {lang} 腾出空间)")
 
                 # 显式删除模型对象
                 try:
@@ -1882,7 +1881,7 @@ class TranscriptionService:
                     pass
 
         # 3. 加载新模型（保留原有的下载和加载逻辑）
-        self.logger.info(f"🔍 加载对齐模型: {lang}")
+        self.logger.debug(f"Loading alignment model: {lang}")
         if job:
             job.message = f"加载对齐模型 {lang}"
 
@@ -1891,14 +1890,14 @@ class TranscriptionService:
             from services.model_preload_manager import get_model_manager as get_preload_manager
             preload_mgr = get_preload_manager()
             if preload_mgr:
-                self.logger.debug("✅ 尝试从预加载管理器获取对齐模型")
+                self.logger.debug("尝试从预加载管理器获取对齐模型")
                 if job:
                     job.message = "加载对齐模型"
                 am, meta = preload_mgr.get_align_model(lang, device)
                 # 4. 加入缓存（自动放在末尾，标记为最近使用）
                 with _align_lock:
                     _align_model_cache[lang] = (am, meta)
-                    self.logger.info(f"✅ 对齐模型已缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
+                    self.logger.info(f"对齐模型已缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
                 return am, meta
         except Exception as e:
             self.logger.debug(f"预加载管理器获取失败，使用直接加载: {e}")
@@ -1912,14 +1911,14 @@ class TranscriptionService:
                 if align_model_info and (align_model_info.status == "not_downloaded" or align_model_info.status == "incomplete"):
                     # 检查模型状态,如果未下载或不完整则触发下载
                     if align_model_info.status == "incomplete":
-                        self.logger.warning(f"⚠️ 对齐模型不完整: {lang}")
+                        self.logger.warning(f"对齐模型不完整: {lang}")
                     else:
-                        self.logger.warning(f"⚠️ 对齐模型未下载: {lang}")
+                        self.logger.warning(f"对齐模型未下载: {lang}")
 
                     # 对齐模型通常为1.2GB左右,给出大模型提示
                     download_msg = "当前下载模型大于1GB (约1.2GB),请耐心等待"
-                    self.logger.info(f"📦 {download_msg}")
-                    self.logger.info(f"🚀 自动触发下载对齐模型: {lang}")
+                    self.logger.info(f"{download_msg}")
+                    self.logger.info(f"自动触发下载对齐模型: {lang}")
 
                     # 更新任务状态
                     if job:
@@ -1928,7 +1927,7 @@ class TranscriptionService:
                     # 触发下载
                     success = model_mgr.download_align_model(lang)
                     if not success:
-                        self.logger.warning(f"⚠️ 模型管理器下载失败或已在下载中,回退到whisperx")
+                        self.logger.warning(f"模型管理器下载失败或已在下载中,回退到whisperx")
                         raise RuntimeError("模型管理器下载失败")
 
                     # 等待下载完成（最多等待10分钟,对齐模型较大）
@@ -1945,36 +1944,36 @@ class TranscriptionService:
                         progress = model_mgr.align_models[lang].download_progress
 
                         if current_status == "ready":
-                            self.logger.info(f"✅ 对齐模型下载完成: {lang}")
+                            self.logger.info(f"对齐模型下载完成: {lang}")
                             if job:
                                 job.message = "对齐模型下载完成,准备加载"
                             break
                         elif current_status == "error":
-                            self.logger.error(f"❌ 模型管理器下载失败,回退到whisperx")
+                            self.logger.error(f"模型管理器下载失败,回退到whisperx")
                             raise RuntimeError(f"对齐模型下载失败: {lang}")
                         else:
                             # 定期提醒用户耐心等待(每30秒)
                             if elapsed % 30 == 0:
                                 wait_msg = f"当前下载模型大于1GB,请耐心等待... {progress:.1f}% ({elapsed}s/{max_wait_time}s)"
-                                self.logger.info(f"⏳ {wait_msg}")
+                                self.logger.info(f"{wait_msg}")
                                 if job:
                                     job.message = wait_msg
                             else:
                                 wait_msg = f"等待对齐模型下载... {progress:.1f}%"
-                                self.logger.info(f"⏳ {wait_msg} ({elapsed}s/{max_wait_time}s)")
+                                self.logger.info(f"{wait_msg} ({elapsed}s/{max_wait_time}s)")
                                 # 更新任务状态(每次都更新,这样用户可以看到进度变化)
                                 if job:
                                     job.message = wait_msg
 
                     if elapsed >= max_wait_time:
-                        self.logger.error(f"❌ 模型下载超时,回退到whisperx")
+                        self.logger.error(f"模型下载超时,回退到whisperx")
                         raise TimeoutError(f"对齐模型下载超时: {lang}")
 
             except Exception as e:
-                self.logger.warning(f"⚠️ 模型管理服务检查失败,回退到whisperx: {e}")
+                self.logger.warning(f"模型管理服务检查失败,回退到whisperx: {e}")
 
             # 直接加载模型（如果已下载或下载完成）
-            self.logger.info(f"🔍 加载对齐模型: {lang}")
+            self.logger.debug(f"Loading alignment model: {lang}")
             if job:
                 job.message = f"加载对齐模型 {lang}"
 
@@ -1989,12 +1988,12 @@ class TranscriptionService:
                 # 加入缓存（自动放在末尾，标记为最近使用）
                 with _align_lock:
                     _align_model_cache[lang] = (am, meta)
-                    self.logger.info(f"✅ 对齐模型已缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
+                    self.logger.info(f"对齐模型已缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
                 if job:
                     job.message = "对齐模型加载完成"
                 return am, meta
             except Exception as e:
-                self.logger.warning(f"⚠️ 本地加载对齐模型失败,允许whisperx下载: {e}")
+                self.logger.warning(f"本地加载对齐模型失败,允许whisperx下载: {e}")
                 if job:
                     job.message = "本地对齐模型不存在,使用whisperx下载"
                 # 如果本地加载失败,允许whisperx下载
@@ -2005,7 +2004,7 @@ class TranscriptionService:
                 # 加入缓存（自动放在末尾，标记为最近使用）
                 with _align_lock:
                     _align_model_cache[lang] = (am, meta)
-                    self.logger.info(f"✅ 对齐模型已下载并缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
+                    self.logger.info(f"对齐模型已下载并缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
                 if job:
                     job.message = "对齐模型下载并加载完成"
                 return am, meta
@@ -2280,7 +2279,7 @@ class TranscriptionService:
         Returns:
             List[Dict]: 对齐后的结果
         """
-        self.logger.info(f"🔧 开始统一对齐 {len(unaligned_results)} 个分段的转录结果")
+        self.logger.info(f"开始统一对齐 {len(unaligned_results)} 个分段的转录结果")
 
         # 1. 合并所有segments
         all_segments = []
@@ -2573,7 +2572,7 @@ class TranscriptionService:
         with open(path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
 
-        self.logger.info(f"✅ SRT文件已生成: {path}, 共{n-1}条字幕")
+        self.logger.info(f"SRT文件已生成: {path}, 共{n-1}条字幕")
 
     def clear_model_cache(self):
         """
@@ -2593,15 +2592,15 @@ class TranscriptionService:
                 except:
                     pass
             _model_cache.clear()
-            self.logger.info("🧹 Whisper模型缓存已清空")
+            self.logger.info("Whisper模型缓存已清空")
 
         # 2. 保留对齐模型（记录当前缓存状态）
         with _align_lock:
             cached_langs = list(_align_model_cache.keys())
             if cached_langs:
-                self.logger.debug(f"🔄 保留对齐模型缓存 (LRU): {cached_langs}")
+                self.logger.debug(f"保留对齐模型缓存 (LRU): {cached_langs}")
             else:
-                self.logger.debug("🔄 对齐模型缓存为空")
+                self.logger.debug("对齐模型缓存为空")
 
 
 # 单例处理器

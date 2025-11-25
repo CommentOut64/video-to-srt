@@ -34,7 +34,7 @@ class UserConfigService:
                 "version": "1.0"
             }
             self._save_config(default_config)
-            logger.info(f"✅ 创建默认用户配置文件: {self.config_file}")
+            logger.info(f"创建默认用户配置文件: {self.config_file}")
 
     def _load_config(self) -> Dict[str, Any]:
         """加载配置文件"""
@@ -57,7 +57,7 @@ class UserConfigService:
                     json.dump(config_data, f, ensure_ascii=False, indent=2)
                 # 清除缓存
                 self._config_cache = None
-                logger.debug(f"✅ 用户配置已保存: {self.config_file}")
+                logger.debug(f"用户配置已保存: {self.config_file}")
             except Exception as e:
                 logger.error(f"❌ 保存用户配置失败: {e}")
 
@@ -87,7 +87,7 @@ class UserConfigService:
             config_data = self._load_config()
             config_data["default_preload_model"] = model_id
             self._save_config(config_data)
-            logger.info(f"✅ 设置默认预加载模型: {model_id}")
+            logger.info(f"设置默认预加载模型: {model_id}")
             return True
         except Exception as e:
             logger.error(f"❌ 设置默认预加载模型失败: {e}")
@@ -111,7 +111,7 @@ class UserConfigService:
             config_data = self._load_config()
             config_data.update(updates)
             self._save_config(config_data)
-            logger.info(f"✅ 更新用户配置: {list(updates.keys())}")
+            logger.info(f"更新用户配置: {list(updates.keys())}")
             return True
         except Exception as e:
             logger.error(f"❌ 更新用户配置失败: {e}")
@@ -127,5 +127,5 @@ def get_user_config_service() -> UserConfigService:
     global _user_config_service
     if _user_config_service is None:
         _user_config_service = UserConfigService()
-        logger.info("🏗️ 用户配置服务已初始化")
+        logger.info("用户配置服务已初始化")
     return _user_config_service
