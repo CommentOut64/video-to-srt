@@ -163,7 +163,7 @@
 
         <el-table-column prop="message" label="消息" min-width="150" />
 
-        <el-table-column label="操作" width="240" fixed="right">
+        <el-table-column label="操作" width="300" fixed="right">
           <template #default="scope">
             <!-- 开始/继续按钮 -->
             <el-button
@@ -198,16 +198,36 @@
               取消
             </el-button>
 
-            <!-- 插队按钮（测试V2.4功能） -->
-            <el-button
+            <!-- 插队按钮组（V2.4功能） -->
+            <el-dropdown
               v-if="canPrioritize(scope.row)"
+              split-button
               type="primary"
               size="small"
-              @click="prioritizeTask(scope.row)"
+              @click="prioritizeTask(scope.row, 'gentle')"
+              @command="(cmd) => prioritizeTask(scope.row, cmd)"
               :loading="scope.row.prioritizing"
             >
               插队
-            </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="gentle">
+                    <el-icon><CaretRight /></el-icon>
+                    温和插队
+                    <span style="color: #909399; font-size: 12px; margin-left: 8px;">
+                      (等当前任务完成)
+                    </span>
+                  </el-dropdown-item>
+                  <el-dropdown-item command="force">
+                    <el-icon><Warning /></el-icon>
+                    强制插队
+                    <span style="color: #909399; font-size: 12px; margin-left: 8px;">
+                      (暂停当前任务)
+                    </span>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
       </el-table>
@@ -231,20 +251,60 @@
       </div>
     </div>
 
+    <!-- 插队设置 -->
+    <div class="prioritize-settings-section">
+      <el-divider content-position="left">插队设置 (V2.4)</el-divider>
+
+      <el-form :inline="true" label-width="120px">
+        <el-form-item label="默认插队模式">
+          <el-select
+            v-model="defaultPrioritizeMode"
+            placeholder="选择默认模式"
+            @change="updatePrioritizeSettings"
+            :loading="loadingSettings"
+          >
+            <el-option value="gentle" label="温和插队">
+              <span>温和插队</span>
+              <span style="color: #909399; font-size: 12px; margin-left: 8px;">
+                放到队列头部，等当前任务完成
+              </span>
+            </el-option>
+            <el-option value="force" label="强制插队">
+              <span>强制插队</span>
+              <span style="color: #909399; font-size: 12px; margin-left: 8px;">
+                暂停当前任务，完成后自动恢复
+              </span>
+            </el-option>
+          </el-select>
+        </el-form-item>
+      </el-form>
+
+      <el-alert type="info" :closable="false" style="margin-top: 12px;">
+        <template #title>插队模式说明</template>
+        <template #default>
+          <ul style="margin: 8px 0; padding-left: 20px;">
+            <li><strong>温和插队</strong>: 将任务放到等待队列的头部，当前正在执行的任务继续完成</li>
+            <li><strong>强制插队</strong>: 暂停当前任务A -> 执行插队任务B -> B完成后自动恢复A</li>
+          </ul>
+        </template>
+      </el-alert>
+    </div>
+
     <!-- 测试说明 -->
     <div class="test-instructions">
       <el-divider content-position="left">测试说明</el-divider>
       <el-alert type="info" :closable="false" show-icon>
-        <template #title>V2.2 任务队列测试要点</template>
+        <template #title>V2.4 任务队列测试要点</template>
         <template #default>
           <ol style="margin: 8px 0; padding-left: 20px;">
             <li>从input目录选择3个视频文件，点击"创建任务并启动"</li>
-            <li>或者手动上传3个视频文件</li>
             <li>观察：应该只有1个任务显示"处理中"，其他显示"排队中"</li>
-            <li>测试暂停：点击处理中任务的"暂停"</li>
-            <li>测试取消：点击排队中任务的"取消"</li>
-            <li>测试插队：点击排队任务的"插队"按钮（如果实现了V2.4）</li>
-            <li>强制重启后端以测试队列恢复功能</li>
+            <li>测试<strong>温和插队</strong>：点击排队任务的"插队"按钮（默认温和模式）</li>
+            <li>观察：插队任务移到队列第1位，当前任务继续执行</li>
+            <li>测试<strong>强制插队</strong>：点击插队按钮右侧下拉菜单选择"强制插队"</li>
+            <li>观察：当前任务被暂停，插队任务开始执行</li>
+            <li>观察：插队任务完成后，被中断的任务自动恢复执行</li>
+            <li>修改"默认插队模式"设置，测试设置是否生效</li>
           </ol>
         </template>
       </el-alert>
@@ -255,6 +315,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CaretRight, Warning } from '@element-plus/icons-vue'
 import axios from 'axios'
 
 // input目录文件相关
@@ -271,6 +332,10 @@ const uploading = ref(false)
 const tasks = ref([])
 const loading = ref(false)
 const pollTimer = ref(null)
+
+// 插队设置相关
+const defaultPrioritizeMode = ref('gentle')
+const loadingSettings = ref(false)
 
 // 计算属性
 const queuedCount = computed(() => tasks.value.filter(t => t.status === 'queued').length)
@@ -555,20 +620,63 @@ async function cancelTask(task) {
   }
 }
 
-async function prioritizeTask(task) {
+async function prioritizeTask(task, mode = null) {
   task.prioritizing = true
 
+  // 如果没有指定模式，使用默认模式
+  const actualMode = mode || defaultPrioritizeMode.value
+
   try {
-    await axios.post(`/api/prioritize/${task.job_id}`)
-    ElMessage.success('任务已插队到队首')
+    const response = await axios.post(`/api/prioritize/${task.job_id}?mode=${actualMode}`)
+    const result = response.data
+
+    if (result.mode === 'gentle') {
+      ElMessage.success('温和插队成功，任务已移到队列头部')
+    } else if (result.mode === 'force') {
+      if (result.interrupted_job_id) {
+        ElMessage.success('强制插队成功，当前任务已暂停，完成后将自动恢复')
+      } else {
+        ElMessage.success('强制插队成功，任务已移到队列头部')
+      }
+    }
 
     // 刷新状态
     setTimeout(() => refreshQueue(), 1000)
   } catch (error) {
     console.error('插队失败:', error)
-    ElMessage.warning('插队功能未实现（需要V2.4）')
+    const errorMsg = error.response?.data?.detail || '插队失败'
+    ElMessage.error(errorMsg)
   } finally {
     task.prioritizing = false
+  }
+}
+
+// 加载插队设置
+async function loadPrioritizeSettings() {
+  loadingSettings.value = true
+  try {
+    const response = await axios.get('/api/queue-settings')
+    defaultPrioritizeMode.value = response.data.default_prioritize_mode || 'gentle'
+  } catch (error) {
+    console.error('加载设置失败:', error)
+  } finally {
+    loadingSettings.value = false
+  }
+}
+
+// 更新插队设置
+async function updatePrioritizeSettings() {
+  loadingSettings.value = true
+  try {
+    await axios.post('/api/queue-settings', {
+      default_prioritize_mode: defaultPrioritizeMode.value
+    })
+    ElMessage.success(`默认插队模式已设置为: ${defaultPrioritizeMode.value === 'gentle' ? '温和插队' : '强制插队'}`)
+  } catch (error) {
+    console.error('更新设置失败:', error)
+    ElMessage.error('更新设置失败')
+  } finally {
+    loadingSettings.value = false
   }
 }
 
@@ -638,6 +746,7 @@ function stopPolling() {
 // 生命周期
 onMounted(() => {
   loadInputFiles() // 加载input目录文件
+  loadPrioritizeSettings() // 加载插队设置
   startPolling()
 })
 
@@ -738,6 +847,14 @@ onUnmounted(() => {
   padding: 20px;
   background: #f5f7fa;
   border-radius: 8px;
+}
+
+.prioritize-settings-section {
+  margin-bottom: 30px;
+  padding: 16px;
+  background: #fafafa;
+  border-radius: 8px;
+  border: 1px solid #e4e7ed;
 }
 
 .test-instructions {

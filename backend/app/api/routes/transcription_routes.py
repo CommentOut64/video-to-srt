@@ -4,7 +4,8 @@
 import os
 import uuid
 import shutil
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
+from typing import Optional
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Body
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import json
@@ -258,6 +259,95 @@ def create_transcription_router(
         if not ok:
             raise HTTPException(status_code=404, detail="任务未找到")
         return {"job_id": job_id, "paused": ok}
+
+    @router.post("/prioritize/{job_id}")
+    async def prioritize_job(job_id: str, mode: Optional[str] = None):
+        """
+        将任务移到队列头部（插队）
+
+        Args:
+            job_id: 任务ID
+            mode: 插队模式
+                - "gentle": 温和插队，放到队列头部，等当前任务完成后执行
+                - "force": 强制插队，暂停当前任务A -> 执行B -> B完成后自动恢复A
+                - None: 使用默认模式（可通过 /api/queue-settings 配置）
+        """
+        queue_service = get_queue_service()
+        result = queue_service.prioritize_job(job_id, mode=mode)
+
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error", "无法优先此任务")
+            )
+
+        return {
+            "job_id": job_id,
+            "prioritized": True,
+            "mode": result.get("mode"),
+            "interrupted_job_id": result.get("interrupted_job_id"),
+            "queue_position": 1
+        }
+
+    @router.get("/queue-settings")
+    async def get_queue_settings():
+        """
+        获取队列设置
+
+        返回:
+            - default_prioritize_mode: 默认插队模式 ("gentle" 或 "force")
+        """
+        queue_service = get_queue_service()
+        return queue_service.get_settings()
+
+    @router.post("/queue-settings")
+    async def update_queue_settings(
+        default_prioritize_mode: Optional[str] = Body(None, embed=True)
+    ):
+        """
+        更新队列设置
+
+        Args:
+            default_prioritize_mode: 默认插队模式
+                - "gentle": 温和插队（默认）
+                - "force": 强制插队
+        """
+        queue_service = get_queue_service()
+        try:
+            settings = queue_service.update_settings(
+                default_prioritize_mode=default_prioritize_mode
+            )
+            return {
+                "success": True,
+                "settings": settings
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @router.post("/reorder-queue")
+    async def reorder_queue(job_ids: list = Body(..., embed=True)):
+        """
+        重新排序队列
+
+        Args:
+            job_ids: 按新顺序排列的任务ID列表
+        """
+        queue_service = get_queue_service()
+        ok = queue_service.reorder_queue(job_ids)
+
+        if not ok:
+            raise HTTPException(status_code=400, detail="重排队列失败（任务ID不匹配）")
+
+        return {
+            "reordered": True,
+            "queue": job_ids
+        }
+
+    @router.get("/queue-status")
+    async def get_queue_status():
+        """获取队列状态摘要"""
+        queue_service = get_queue_service()
+        return queue_service.get_queue_status()
 
     @router.get("/incomplete-jobs")
     async def get_incomplete_jobs():
