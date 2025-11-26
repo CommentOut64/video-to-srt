@@ -418,8 +418,14 @@ def create_transcription_router(
         return job.to_dict()
 
     @router.get("/status/{job_id}")
-    async def get_job_status(job_id: str):
-        """获取任务状态（V2.2: 包含队列位置）"""
+    async def get_job_status(job_id: str, include_media: bool = True):
+        """
+        获取任务状态（V2.3: 包含队列位置和媒体状态）
+
+        Args:
+            job_id: 任务ID
+            include_media: 是否包含媒体状态信息（默认True）
+        """
         queue_service = get_queue_service()
         job = queue_service.get_job(job_id)
         if not job:
@@ -439,6 +445,27 @@ def create_transcription_router(
                 result["queue_position"] = 0  # 0表示正在执行
             else:
                 result["queue_position"] = -1  # -1表示不在队列中
+
+        # 添加媒体状态信息（用于编辑器）
+        if include_media and job.status == "finished" and job.dir:
+            job.update_media_status(job.dir)
+            if job.media_status:
+                result["media_status"] = {
+                    "video_exists": job.media_status.video_exists,
+                    "video_format": job.media_status.video_format,
+                    "needs_proxy": job.media_status.needs_proxy,
+                    "proxy_exists": job.media_status.proxy_exists,
+                    "audio_exists": job.media_status.audio_exists,
+                    "peaks_ready": job.media_status.peaks_ready,
+                    "thumbnails_ready": job.media_status.thumbnails_ready,
+                    "srt_exists": job.media_status.srt_exists,
+                    # 便捷的URL字段
+                    "video_url": f"/api/media/{job_id}/video" if job.media_status.video_exists or job.media_status.proxy_exists else None,
+                    "audio_url": f"/api/media/{job_id}/audio" if job.media_status.audio_exists else None,
+                    "peaks_url": f"/api/media/{job_id}/peaks" if job.media_status.audio_exists else None,
+                    "thumbnails_url": f"/api/media/{job_id}/thumbnails" if job.media_status.video_exists else None,
+                    "srt_url": f"/api/media/{job_id}/srt" if job.media_status.srt_exists else None
+                }
 
         return result
 

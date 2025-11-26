@@ -22,6 +22,19 @@ class JobSettings:
 
 
 @dataclass
+class MediaStatus:
+    """媒体资源状态（用于编辑器）"""
+    video_exists: bool = False          # 视频文件是否存在
+    video_format: Optional[str] = None  # 视频格式（.mp4, .mkv等）
+    needs_proxy: bool = False           # 是否需要Proxy转码
+    proxy_exists: bool = False          # Proxy视频是否已生成
+    audio_exists: bool = False          # 音频文件是否存在
+    peaks_ready: bool = False           # 波形峰值数据是否就绪
+    thumbnails_ready: bool = False      # 缩略图是否就绪
+    srt_exists: bool = False            # SRT文件是否存在
+
+
+@dataclass
 class JobState:
     """转录任务状态"""
     job_id: str
@@ -42,8 +55,60 @@ class JobState:
     canceled: bool = False
     paused: bool = False  # 暂停标志
 
+    # 媒体状态（用于编辑器，转录完成后更新）
+    media_status: Optional[MediaStatus] = None
+
     def to_dict(self):
         """转换为字典格式，用于API响应"""
         d = asdict(self)
         d.pop('segments', None)  # 不透出内部详情
         return d
+
+    def update_media_status(self, job_dir: str):
+        """
+        更新媒体状态（检查各类资源文件是否就绪）
+
+        Args:
+            job_dir: 任务目录路径
+        """
+        from pathlib import Path
+
+        job_path = Path(job_dir)
+        if not job_path.exists():
+            return
+
+        # 需要转码的格式
+        need_transcode_formats = {'.mkv', '.avi', '.mov', '.wmv', '.flv', '.m4v'}
+
+        # 查找视频文件
+        video_file = None
+        video_exts = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.webm', '.flv', '.m4v']
+        for file in job_path.iterdir():
+            if file.is_file() and file.suffix.lower() in video_exts:
+                video_file = file
+                break
+
+        # 检查各项资源
+        audio_file = job_path / "audio.wav"
+        proxy_file = job_path / "proxy.mp4"
+        peaks_file = job_path / "peaks_2000.json"
+        thumbnails_file = job_path / "thumbnails_10.json"
+
+        # 查找SRT文件
+        srt_exists = False
+        for file in job_path.iterdir():
+            if file.suffix.lower() == '.srt':
+                srt_exists = True
+                break
+
+        # 更新媒体状态
+        self.media_status = MediaStatus(
+            video_exists=video_file is not None,
+            video_format=video_file.suffix if video_file else None,
+            needs_proxy=video_file is not None and video_file.suffix.lower() in need_transcode_formats,
+            proxy_exists=proxy_file.exists(),
+            audio_exists=audio_file.exists(),
+            peaks_ready=peaks_file.exists(),
+            thumbnails_ready=thumbnails_file.exists(),
+            srt_exists=srt_exists
+        )

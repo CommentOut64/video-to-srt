@@ -594,6 +594,53 @@ class TranscriptionService:
         except Exception as e:
             self.logger.debug(f"SSE信号推送失败（非致命）: {e}")
 
+    def _trigger_media_post_process(self, job_id: str):
+        """
+        异步触发媒体预处理（转录完成后调用）
+        生成波形峰值、视频缩略图、Proxy视频等，为编辑器做准备
+
+        Args:
+            job_id: 任务ID
+        """
+        try:
+            import asyncio
+            import aiohttp
+
+            async def do_post_process():
+                """异步执行预处理请求"""
+                try:
+                    # 调用媒体预处理接口
+                    async with aiohttp.ClientSession() as session:
+                        url = f"http://127.0.0.1:8000/api/media/{job_id}/post-process"
+                        async with session.post(url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                            if resp.status == 200:
+                                result = await resp.json()
+                                self.logger.info(f"媒体预处理完成: peaks={result.get('peaks')}, thumbnails={result.get('thumbnails')}, proxy={result.get('proxy')}")
+                            else:
+                                self.logger.warning(f"媒体预处理请求失败: {resp.status}")
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"媒体预处理超时: {job_id}")
+                except Exception as e:
+                    self.logger.warning(f"媒体预处理异常: {e}")
+
+            # 尝试在现有事件循环中执行
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.ensure_future(do_post_process(), loop=loop)
+            except RuntimeError:
+                # 没有运行中的事件循环，创建新线程执行
+                import threading
+                def run_in_thread():
+                    asyncio.run(do_post_process())
+                thread = threading.Thread(target=run_in_thread, daemon=True)
+                thread.start()
+
+            self.logger.info(f"已触发媒体预处理任务: {job_id}")
+
+        except Exception as e:
+            # 预处理失败不影响转录结果
+            self.logger.warning(f"触发媒体预处理失败（非致命）: {e}")
+
     def _push_sse_segment(self, job: JobState, segment_result: dict, processed: int, total: int):
         """
         推送单个segment的转录结果（流式输出）
@@ -1083,6 +1130,9 @@ class TranscriptionService:
                 self.logger.info(f"任务完成: {job.job_id}")
                 # 推送完成信号
                 self._push_sse_signal(job, "job_complete", "转录完成")
+
+                # 异步触发媒体预处理（生成波形、缩略图等，为编辑器做准备）
+                self._trigger_media_post_process(job.job_id)
 
         except Exception as e:
             if job.canceled and '取消' in str(e):

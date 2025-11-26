@@ -36,6 +36,7 @@ from config.model_config import ModelPreloadConfig
 
 # 导入API路由
 from api.routes import model_routes
+from api.routes import media_routes  # 新增：媒体资源路由
 from api.routes.transcription_routes import create_transcription_router
 from services.file_service import FileManagementService
 
@@ -57,6 +58,7 @@ app.add_middleware(
 
 # 注册API路由
 app.include_router(model_routes.router)
+app.include_router(media_routes.router)  # 新增：媒体资源路由
 
 @app.on_event("startup")
 async def startup_event():
