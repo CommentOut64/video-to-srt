@@ -1,0 +1,100 @@
+// ==============================================
+// 主题色彩系统 (深色模式优先)
+// ==============================================
+
+// 深色模式变量
+$bg-primary: #1e1e1e;
+$bg-secondary: #2d2d2d;
+$bg-tertiary: #3d3d3d;
+$text-normal: #cccccc;
+$text-muted: #888888;
+$text-bright: #ffffff;
+$accent-blue: #409eff;
+$accent-green: #67c23a;
+$accent-orange: #e6a23c;
+$accent-red: #f56c6c;
+$border-color: rgba(255, 255, 255, 0.1);
+
+// CSS 变量定义 (支持主题切换)
+:root {
+  // 背景色
+  --bg-primary: #{$bg-primary};
+  --bg-secondary: #{$bg-secondary};
+  --bg-tertiary: #{$bg-tertiary};
+
+  // 文本色
+  --text-normal: #{$text-normal};
+  --text-muted: #{$text-muted};
+  --text-bright: #{$text-bright};
+
+  // 主题色
+  --accent-blue: #{$accent-blue};
+  --accent-green: #{$accent-green};
+  --accent-orange: #{$accent-orange};
+  --accent-red: #{$accent-red};
+
+  // 边框色
+  --border-color: #{$border-color};
+
+  // 阴影
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.3);
+
+  // 圆角
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  // 过渡
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.3s ease;
+}
+
+// 浅色模式覆盖
+[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-tertiary: #e8e8e8;
+  --text-normal: #333333;
+  --text-muted: #666666;
+  --text-bright: #000000;
+  --border-color: rgba(0, 0, 0, 0.1);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.15);
+}
+
+// ==============================================
+// 间距系统
+// ==============================================
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-md: 16px;
+$spacing-lg: 24px;
+$spacing-xl: 32px;
+$spacing-xxl: 48px;
+
+// ==============================================
+// 字体系统
+// ==============================================
+$font-family-base: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+$font-family-mono: "SF Mono", Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+$font-size-xs: 12px;
+$font-size-sm: 13px;
+$font-size-md: 14px;
+$font-size-lg: 16px;
+$font-size-xl: 18px;
+$font-size-xxl: 24px;
+
+// ==============================================
+// Z-Index 层级
+// ==============================================
+$z-dropdown: 100;
+$z-sticky: 200;
+$z-fixed: 300;
+$z-modal-backdrop: 400;
+$z-modal: 500;
+$z-popover: 600;
+$z-tooltip: 700;
