@@ -1,0 +1,528 @@
+<template>
+  <div class="playback-controls" :class="{ compact }">
+    <!-- 主控制区 -->
+    <div class="controls-main">
+      <!-- 快退 -->
+      <button class="ctrl-btn" @click="seek(-seekStep)" title="快退5秒">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z"/>
+        </svg>
+      </button>
+
+      <!-- 播放/暂停 -->
+      <button class="ctrl-btn ctrl-btn--play" @click="togglePlay" :title="isPlaying ? '暂停' : '播放'">
+        <svg v-if="!isPlaying" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+        <svg v-else viewBox="0 0 24 24" fill="currentColor">
+          <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+        </svg>
+      </button>
+
+      <!-- 快进 -->
+      <button class="ctrl-btn" @click="seek(seekStep)" title="快进5秒">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 进度条区域 -->
+    <div class="controls-progress">
+      <span class="time-display time-current">{{ formatTime(currentTime) }}</span>
+
+      <div class="progress-bar" ref="progressRef" @click="handleProgressClick" @mousedown="startDrag">
+        <div class="progress-track">
+          <div class="progress-buffered" :style="{ width: bufferedPercent + '%' }"></div>
+          <div class="progress-played" :style="{ width: progressPercent + '%' }"></div>
+        </div>
+        <div class="progress-thumb" :style="{ left: progressPercent + '%' }"></div>
+      </div>
+
+      <span class="time-display time-total">{{ formatTime(duration) }}</span>
+    </div>
+
+    <!-- 辅助控制区 -->
+    <div class="controls-extra">
+      <!-- 音量控制 -->
+      <div class="volume-control" v-if="showVolume">
+        <button class="ctrl-btn ctrl-btn--sm" @click="toggleMute" :title="isMuted ? '取消静音' : '静音'">
+          <svg v-if="isMuted || volume === 0" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+          </svg>
+          <svg v-else-if="volume < 0.5" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M18.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/>
+          </svg>
+          <svg v-else viewBox="0 0 24 24" fill="currentColor">
+            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+          </svg>
+        </button>
+        <div class="volume-slider" @click.stop>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            :value="volume"
+            @input="handleVolumeChange"
+          />
+        </div>
+      </div>
+
+      <!-- 倍速控制 -->
+      <div class="speed-control" v-if="showSpeed">
+        <button class="ctrl-btn ctrl-btn--text" @click="toggleSpeedMenu" ref="speedBtnRef">
+          {{ playbackRate }}x
+        </button>
+        <div class="speed-menu" v-show="showSpeedMenu" ref="speedMenuRef">
+          <button
+            v-for="speed in speedOptions"
+            :key="speed"
+            class="speed-option"
+            :class="{ active: playbackRate === speed }"
+            @click="setSpeed(speed)"
+          >
+            {{ speed }}x
+          </button>
+        </div>
+      </div>
+
+      <!-- 循环播放 -->
+      <button
+        v-if="showLoop"
+        class="ctrl-btn ctrl-btn--sm"
+        :class="{ active: isLooping }"
+        @click="toggleLoop"
+        title="循环播放"
+      >
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useProjectStore } from '@/stores/projectStore'
+
+// Props
+const props = defineProps({
+  compact: { type: Boolean, default: false },
+  showSpeed: { type: Boolean, default: true },
+  showVolume: { type: Boolean, default: true },
+  showLoop: { type: Boolean, default: true },
+  seekStep: { type: Number, default: 5 },
+  microSeekStep: { type: Number, default: 0.1 }
+})
+
+const emit = defineEmits(['play', 'pause', 'seek', 'speed-change', 'volume-change'])
+
+// Store
+const projectStore = useProjectStore()
+
+// Refs
+const progressRef = ref(null)
+const speedBtnRef = ref(null)
+const speedMenuRef = ref(null)
+
+// State
+const isLooping = ref(false)
+const isMuted = ref(false)
+const previousVolume = ref(1)
+const showSpeedMenu = ref(false)
+const isDragging = ref(false)
+const bufferedPercent = ref(0)
+
+// 倍速选项
+const speedOptions = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
+
+// 从 Store 获取状态
+const currentTime = computed(() => projectStore.player.currentTime)
+const duration = computed(() => projectStore.meta.duration || 0)
+const isPlaying = computed(() => projectStore.player.isPlaying)
+const playbackRate = computed(() => projectStore.player.playbackRate)
+const volume = computed(() => isMuted.value ? 0 : projectStore.player.volume)
+
+// 进度百分比
+const progressPercent = computed(() => {
+  if (!duration.value) return 0
+  return (currentTime.value / duration.value) * 100
+})
+
+// 播放/暂停
+function togglePlay() {
+  projectStore.player.isPlaying = !projectStore.player.isPlaying
+  emit(projectStore.player.isPlaying ? 'play' : 'pause')
+}
+
+// 跳转
+function seek(seconds) {
+  const newTime = Math.max(0, Math.min(duration.value, currentTime.value + seconds))
+  projectStore.seekTo(newTime)
+  emit('seek', newTime)
+}
+
+// 进度条点击
+function handleProgressClick(e) {
+  if (!progressRef.value || !duration.value) return
+  const rect = progressRef.value.getBoundingClientRect()
+  const percent = (e.clientX - rect.left) / rect.width
+  const newTime = percent * duration.value
+  projectStore.seekTo(newTime)
+  emit('seek', newTime)
+}
+
+// 拖拽进度条
+function startDrag(e) {
+  isDragging.value = true
+  document.addEventListener('mousemove', onDrag)
+  document.addEventListener('mouseup', stopDrag)
+}
+
+function onDrag(e) {
+  if (!isDragging.value || !progressRef.value || !duration.value) return
+  const rect = progressRef.value.getBoundingClientRect()
+  const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+  const newTime = percent * duration.value
+  projectStore.seekTo(newTime)
+}
+
+function stopDrag() {
+  isDragging.value = false
+  document.removeEventListener('mousemove', onDrag)
+  document.removeEventListener('mouseup', stopDrag)
+}
+
+// 音量控制
+function toggleMute() {
+  if (isMuted.value) {
+    projectStore.player.volume = previousVolume.value
+    isMuted.value = false
+  } else {
+    previousVolume.value = projectStore.player.volume
+    projectStore.player.volume = 0
+    isMuted.value = true
+  }
+}
+
+function handleVolumeChange(e) {
+  const val = parseFloat(e.target.value)
+  projectStore.player.volume = val
+  if (val > 0) isMuted.value = false
+  emit('volume-change', val)
+}
+
+// 倍速控制
+function toggleSpeedMenu() {
+  showSpeedMenu.value = !showSpeedMenu.value
+}
+
+function setSpeed(speed) {
+  projectStore.player.playbackRate = speed
+  showSpeedMenu.value = false
+  emit('speed-change', speed)
+}
+
+// 循环播放
+function toggleLoop() {
+  isLooping.value = !isLooping.value
+}
+
+// 格式化时间
+function formatTime(seconds) {
+  if (!seconds || isNaN(seconds)) return '0:00'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+  }
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+// 键盘快捷键
+function handleKeyboard(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
+
+  switch (e.code) {
+    case 'Space':
+      e.preventDefault()
+      togglePlay()
+      break
+    case 'ArrowLeft':
+      e.preventDefault()
+      seek(e.shiftKey ? -props.microSeekStep : -props.seekStep)
+      break
+    case 'ArrowRight':
+      e.preventDefault()
+      seek(e.shiftKey ? props.microSeekStep : props.seekStep)
+      break
+    case 'ArrowUp':
+      e.preventDefault()
+      projectStore.player.volume = Math.min(1, projectStore.player.volume + 0.1)
+      break
+    case 'ArrowDown':
+      e.preventDefault()
+      projectStore.player.volume = Math.max(0, projectStore.player.volume - 0.1)
+      break
+  }
+}
+
+// 点击外部关闭倍速菜单
+function handleClickOutside(e) {
+  if (speedBtnRef.value && !speedBtnRef.value.contains(e.target) &&
+      speedMenuRef.value && !speedMenuRef.value.contains(e.target)) {
+    showSpeedMenu.value = false
+  }
+}
+
+// 循环播放逻辑
+watch(currentTime, (time) => {
+  if (isLooping.value && duration.value && time >= duration.value - 0.1) {
+    projectStore.seekTo(0)
+    if (!isPlaying.value) togglePlay()
+  }
+})
+
+onMounted(() => {
+  document.addEventListener('keydown', handleKeyboard)
+  document.addEventListener('click', handleClickOutside)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeyboard)
+  document.removeEventListener('click', handleClickOutside)
+})
+</script>
+
+<style lang="scss" scoped>
+.playback-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  user-select: none;
+
+  &.compact {
+    gap: 12px;
+    padding: 8px 12px;
+
+    .controls-progress {
+      .time-display { font-size: 11px; }
+    }
+  }
+}
+
+// 主控制按钮
+.controls-main {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+// 控制按钮
+.ctrl-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+
+  svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  &:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+  }
+
+  &--play {
+    width: 44px;
+    height: 44px;
+    background: var(--primary);
+    color: white;
+
+    svg { width: 24px; height: 24px; }
+
+    &:hover {
+      background: var(--primary-hover);
+      color: white;
+    }
+  }
+
+  &--sm {
+    width: 32px;
+    height: 32px;
+    svg { width: 18px; height: 18px; }
+  }
+
+  &--text {
+    width: auto;
+    padding: 0 10px;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: var(--font-mono);
+  }
+
+  &.active {
+    color: var(--primary);
+    background: rgba(88, 166, 255, 0.15);
+  }
+}
+
+// 进度条区域
+.controls-progress {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 200px;
+
+  .time-display {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    min-width: 45px;
+
+    &.time-total { text-align: right; }
+  }
+
+  .progress-bar {
+    flex: 1;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    position: relative;
+
+    &:hover {
+      .progress-track { height: 6px; }
+      .progress-thumb { opacity: 1; transform: translateX(-50%) scale(1); }
+    }
+  }
+
+  .progress-track {
+    width: 100%;
+    height: 4px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    position: relative;
+    transition: height var(--transition-fast);
+    overflow: hidden;
+  }
+
+  .progress-buffered {
+    position: absolute;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+  }
+
+  .progress-played {
+    position: absolute;
+    height: 100%;
+    background: var(--primary);
+    border-radius: 2px;
+  }
+
+  .progress-thumb {
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    background: var(--primary);
+    border-radius: 50%;
+    transform: translateX(-50%) scale(0.8);
+    opacity: 0;
+    transition: all var(--transition-fast);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  }
+}
+
+// 辅助控制
+.controls-extra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+// 音量控制
+.volume-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .volume-slider {
+    width: 80px;
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 4px;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      cursor: pointer;
+
+      &::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        background: var(--text-primary);
+        border-radius: 50%;
+        cursor: pointer;
+        transition: transform var(--transition-fast);
+
+        &:hover { transform: scale(1.2); }
+      }
+    }
+  }
+}
+
+// 倍速控制
+.speed-control {
+  position: relative;
+
+  .speed-menu {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 8px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: 4px;
+    box-shadow: var(--shadow-lg);
+    z-index: 100;
+  }
+
+  .speed-option {
+    display: block;
+    width: 100%;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    color: var(--text-normal);
+    text-align: center;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+
+    &:hover {
+      background: var(--bg-tertiary);
+    }
+
+    &.active {
+      color: var(--primary);
+      background: rgba(88, 166, 255, 0.15);
+    }
+  }
+}
+</style>
