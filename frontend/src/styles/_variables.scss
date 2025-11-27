@@ -72,6 +72,7 @@ $region-selected: rgba(163, 113, 247, 0.35);
   --primary: #{$primary};
   --primary-hover: #{$primary-hover};
   --primary-dim: #{$primary-dim};
+  --primary-rgb: 88, 166, 255;  // 用于 rgba() 颜色
   --accent-blue: #{$primary};
 
   --success: #{$success};
@@ -93,6 +94,7 @@ $region-selected: rgba(163, 113, 247, 0.35);
   --border-default: #{$border-default};
   --border-muted: #{$border-muted};
   --border-subtle: #{$border-subtle};
+  --border-light: rgba(48, 54, 61, 0.5);  // 更淡的边框色
   --border-color: #{$border-default};
 
   // 波形专用

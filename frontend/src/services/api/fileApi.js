@@ -27,6 +27,17 @@ class FileAPI {
   async deleteFile(filename) {
     return apiClient.delete(`/api/files/${encodeURIComponent(filename)}`)
   }
+
+  /**
+   * 批量创建转录任务（从 input 目录选择多个文件）
+   * @param {string[]} filenames - 文件名列表
+   * @returns {Promise<{success: boolean, jobs: Array, failed: Array, total: number, succeeded: number, failed_count: number}>}
+   */
+  async createJobsBatch(filenames) {
+    return apiClient.post('/api/create-jobs-batch', {
+      filenames
+    })
+  }
 }
 
 // 导出单例实例

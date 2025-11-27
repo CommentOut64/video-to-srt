@@ -149,19 +149,84 @@ def create_transcription_router(
             input_path = file_service.get_input_file_path(filename)
             if not os.path.exists(input_path):
                 raise HTTPException(status_code=404, detail="文件不存在")
-            
+
             if not file_service.is_supported_file(filename):
                 raise HTTPException(status_code=400, detail="不支持的文件格式")
-            
+
             job_id = uuid.uuid4().hex
             settings = JobSettings()
             transcription_service.create_job(filename, input_path, settings, job_id=job_id)
-            
+
             return {"job_id": job_id, "filename": filename}
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"创建任务失败: {str(e)}")
+
+    @router.post("/create-jobs-batch")
+    async def create_jobs_batch(filenames: list = Body(..., embed=True)):
+        """
+        批量创建转录任务（从 input 目录选择多个文件）
+
+        Args:
+            filenames: 文件名列表
+
+        Returns:
+            {
+                "success": true,
+                "jobs": [{job_id, filename, queue_position}, ...],
+                "failed": [{filename, error}, ...],
+                "total": int,
+                "succeeded": int,
+                "failed_count": int
+            }
+        """
+        try:
+            queue_service = get_queue_service()
+            jobs = []
+            failed = []
+
+            for filename in filenames:
+                try:
+                    # 验证文件存在
+                    input_path = file_service.get_input_file_path(filename)
+                    if not os.path.exists(input_path):
+                        failed.append({"filename": filename, "error": "文件不存在"})
+                        continue
+
+                    # 验证文件格式
+                    if not file_service.is_supported_file(filename):
+                        failed.append({"filename": filename, "error": "不支持的文件格式"})
+                        continue
+
+                    # 创建任务
+                    job_id = uuid.uuid4().hex
+                    settings = JobSettings()
+                    job = transcription_service.create_job(filename, input_path, settings, job_id=job_id)
+
+                    # 加入队列
+                    queue_service.add_job(job)
+
+                    jobs.append({
+                        "job_id": job_id,
+                        "filename": filename,
+                        "queue_position": len(queue_service.queue)
+                    })
+
+                except Exception as e:
+                    failed.append({"filename": filename, "error": str(e)})
+
+            return {
+                "success": True,
+                "jobs": jobs,
+                "failed": failed,
+                "total": len(filenames),
+                "succeeded": len(jobs),
+                "failed_count": len(failed)
+            }
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"批量创建任务失败: {str(e)}")
 
     @router.post("/start")
     async def start_job(job_id: str = Form(...), settings: str = Form(...)):
