@@ -164,9 +164,9 @@ class SSEChannelManager extends EventEmitter {
    * @private
    */
   _subscribe(channelId, url, eventHandlers) {
-    // 如果已存在连接，先关闭
+    // 如果已存在连接，先关闭（正常的保护性逻辑）
     if (this.channels.has(channelId)) {
-      console.warn(`[SSEChannelManager] 频道 ${channelId} 已存在，先关闭旧连接`)
+      console.log(`[SSEChannelManager] 频道 ${channelId} 已存在，先关闭旧连接`)
       this.unsubscribe(channelId)
     }
 
