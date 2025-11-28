@@ -54,12 +54,18 @@ class SSEChannelManager extends EventEmitter {
         handlers.onQueueUpdate?.(data.queue)
       },
       job_status: (data) => {
+        // 兼容处理：优先使用percent，fallback到progress
+        const percent = data.percent ?? data.progress ?? 0
         console.log('[SSE Global] 任务状态:', data)
-        handlers.onJobStatus?.(data.job_id, data.status, data)
+        // 使用 data.id 而非 data.job_id，兼容全局频道的字段名
+        handlers.onJobStatus?.(data.id || data.job_id, data.status, { ...data, percent })
       },
       job_progress: (data) => {
-        console.log('[SSE Global] 任务进度:', data.job_id, data.percent)
-        handlers.onJobProgress?.(data.job_id, data.percent, data)
+        // 兼容处理：优先使用percent，fallback到progress
+        const percent = data.percent ?? data.progress ?? 0
+        console.log('[SSE Global] 任务进度:', data.id || data.job_id, percent)
+        // 使用 data.id 而非 data.job_id，兼容全局频道的字段名
+        handlers.onJobProgress?.(data.id || data.job_id, percent, { ...data, percent })
       },
       connected: (data) => {
         console.log('[SSE Global] 连接成功:', data)
@@ -94,20 +100,40 @@ class SSEChannelManager extends EventEmitter {
         handlers.onInitialState?.(data)
       },
       progress: (data) => {
-        console.log(`[SSE Job ${jobId}] 进度:`, data.percent)
-        handlers.onProgress?.(data)
+        // 兼容处理：优先使用percent，fallback到progress
+        const percent = data.percent ?? data.progress ?? 0
+        console.log(`[SSE Job ${jobId}] 进度:`, percent)
+        handlers.onProgress?.({ ...data, percent })
       },
       signal: (data) => {
-        console.log(`[SSE Job ${jobId}] 信号:`, data.signal)
+        // 兼容处理：优先使用signal，fallback到code
+        const signal = data.signal || data.code
+        console.log(`[SSE Job ${jobId}] 信号:`, signal)
 
         // 分发特定信号事件
-        if (data.signal === 'job_complete') {
+        if (signal === 'job_complete') {
           handlers.onComplete?.(data)
-        } else if (data.signal === 'job_failed') {
+        } else if (signal === 'job_failed') {
           handlers.onFailed?.(data)
+        } else if (signal === 'job_paused') {
+          handlers.onPaused?.(data)
+        } else if (signal === 'job_canceled') {
+          handlers.onCanceled?.(data)
         }
 
-        handlers.onSignal?.(data.signal, data)
+        handlers.onSignal?.(signal, data)
+      },
+      align_progress: (data) => {
+        console.log(`[SSE Job ${jobId}] 对齐进度:`, data)
+        handlers.onAlignProgress?.(data)
+      },
+      segment: (data) => {
+        console.log(`[SSE Job ${jobId}] 片段:`, data)
+        handlers.onSegment?.(data)
+      },
+      aligned: (data) => {
+        console.log(`[SSE Job ${jobId}] 对齐完成:`, data)
+        handlers.onAligned?.(data)
       },
       proxy_progress: (data) => {
         console.log(`[SSE Job ${jobId}] Proxy 进度:`, data.progress)

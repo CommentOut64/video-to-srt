@@ -91,11 +91,17 @@ export const useUnifiedTaskStore = defineStore('unifiedTask', () => {
       status: taskData.status || TaskStatus.CREATED,
       phase: taskData.phase || TaskPhase.UPLOADING,
       progress: taskData.progress || 0,
+      phase_percent: taskData.phase_percent || 0,  // 新增：阶段内进度 (0-100)
       message: taskData.message || '',
       settings: taskData.settings || null,
+      language: taskData.language || null,  // 新增：语言
+      processed: taskData.processed || 0,   // 新增：已处理数
+      total: taskData.total || 0,           // 新增：总数
       createdAt: taskData.createdAt || Date.now(),
       updatedAt: Date.now(),
-      isDirty: false
+      isDirty: false,
+      sseConnected: false,  // 新增：SSE连接状态
+      lastError: null       // 新增：最后错误信息
     }
 
     tasksMap.value.set(task.job_id, task)
@@ -126,11 +132,23 @@ export const useUnifiedTaskStore = defineStore('unifiedTask', () => {
   /**
    * 更新任务进度
    */
-  function updateTaskProgress(jobId, progress, status) {
+  function updateTaskProgress(jobId, percent, status, extraData = {}) {
     const task = tasksMap.value.get(jobId)
     if (task) {
-      task.progress = progress
+      // 保留1位小数
+      task.progress = typeof percent === 'number' ? Math.round(percent * 10) / 10 : 0
       if (status) task.status = status
+
+      // 更新额外字段
+      if (extraData.phase) task.phase = extraData.phase
+      if (extraData.phase_percent !== undefined) {
+        task.phase_percent = Math.round(extraData.phase_percent * 10) / 10
+      }
+      if (extraData.message) task.message = extraData.message
+      if (extraData.processed !== undefined) task.processed = extraData.processed
+      if (extraData.total !== undefined) task.total = extraData.total
+      if (extraData.language) task.language = extraData.language
+
       task.updatedAt = Date.now()
       // 进度更新频繁，不立即保存到 localStorage
     }
@@ -259,8 +277,13 @@ export const useUnifiedTaskStore = defineStore('unifiedTask', () => {
           Object.assign(existingTask, {
             status: backendTask.status,
             progress: backendTask.progress,
+            phase_percent: backendTask.phase_percent || 0,  // 新增
             message: backendTask.message,
-            filename: backendTask.filename
+            filename: backendTask.filename,
+            phase: backendTask.phase,  // 新增
+            language: backendTask.language,  // 新增
+            processed: backendTask.processed || 0,  // 新增
+            total: backendTask.total || 0  // 新增
           }, { updatedAt: Date.now() })
           updatedCount++
         } else {
@@ -270,8 +293,12 @@ export const useUnifiedTaskStore = defineStore('unifiedTask', () => {
             filename: backendTask.filename,
             status: backendTask.status,
             progress: backendTask.progress,
+            phase_percent: backendTask.phase_percent || 0,
             message: backendTask.message,
             phase: backendTask.phase || (backendTask.status === 'finished' ? 'editing' : 'transcribing'),
+            language: backendTask.language,
+            processed: backendTask.processed || 0,
+            total: backendTask.total || 0,
             createdAt: backendTask.created_time || Date.now()
           })
           addedCount++
