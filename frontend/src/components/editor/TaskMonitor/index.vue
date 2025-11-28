@@ -21,8 +21,15 @@
             <span class="task-name" :title="task.title || task.filename">
               {{ task.title || task.filename }}
             </span>
-            <span class="task-status" :class="task.status">
-              {{ getStatusText(task.status) }}
+            <!-- 使用阶段标签替代简单状态 -->
+            <span
+              class="task-phase-tag"
+              :style="{
+                background: getPhaseStyle(task).bgColor,
+                color: getPhaseStyle(task).color
+              }"
+            >
+              {{ getPhaseLabel(task) }}
             </span>
           </div>
 
@@ -31,7 +38,21 @@
             <div class="progress-bar">
               <div class="progress-fill" :style="{ width: task.progress + '%' }"></div>
             </div>
-            <span class="progress-text">{{ task.progress }}%</span>
+            <span class="progress-text">{{ formatProgress(task.progress) }}%</span>
+          </div>
+
+          <!-- SSE断开指示器 -->
+          <div v-if="!task.sseConnected && task.status === 'processing'" class="sse-disconnected">
+            <span class="warning-dot"></span>
+            <span class="warning-text">连接中断，等待重连...</span>
+          </div>
+
+          <!-- 错误指示器 -->
+          <div v-if="task.lastError && task.status !== 'failed'" class="task-error-indicator">
+            <svg class="error-icon" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+            </svg>
+            <span class="error-text">{{ task.lastError }}</span>
           </div>
 
           <!-- 完成时间 -->
@@ -137,6 +158,7 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUnifiedTaskStore } from '@/stores/unifiedTaskStore'
 import { transcriptionApi } from '@/services/api'
+import { PHASE_CONFIG, STATUS_CONFIG, formatProgress } from '@/constants/taskPhases'
 
 const props = defineProps({
   currentJobId: { type: String, default: '' }
@@ -160,17 +182,32 @@ const finishedCount = computed(() => {
   return filteredTasks.value.filter(t => t.status === 'finished').length
 })
 
-// 状态文本映射
-function getStatusText(status) {
-  const map = {
-    'processing': '转录中',
-    'queued': '排队中',
-    'paused': '已暂停',
-    'finished': '已完成',
-    'failed': '失败',
-    'canceled': '已取消'
+// 获取阶段样式
+function getPhaseStyle(task) {
+  // 如果任务失败，使用失败状态样式
+  if (task.status === 'failed') {
+    return STATUS_CONFIG.failed
   }
-  return map[status] || status
+  // 如果任务正在处理且有阶段信息，使用阶段样式
+  if (task.status === 'processing' && task.phase) {
+    return PHASE_CONFIG[task.phase] || PHASE_CONFIG.pending
+  }
+  // 其他情况使用状态样式
+  return STATUS_CONFIG[task.status] || STATUS_CONFIG.created
+}
+
+// 获取阶段标签文本
+function getPhaseLabel(task) {
+  // 如果任务失败，显示失败
+  if (task.status === 'failed') {
+    return '失败'
+  }
+  // 如果任务正在处理且有阶段信息，显示阶段标签
+  if (task.status === 'processing' && task.phase) {
+    return PHASE_CONFIG[task.phase]?.label || '处理中'
+  }
+  // 其他情况显示状态标签
+  return STATUS_CONFIG[task.status]?.label || task.status
 }
 
 // 暂停任务
@@ -333,37 +370,12 @@ function formatTime(timestamp) {
     white-space: nowrap;
   }
 
-  .task-status {
+  .task-phase-tag {
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 10px;
     font-weight: 600;
     white-space: nowrap;
-
-    &.processing {
-      background: rgba(88, 166, 255, 0.15);
-      color: var(--primary);
-    }
-
-    &.queued {
-      background: rgba(139, 148, 158, 0.15);
-      color: var(--text-muted);
-    }
-
-    &.finished {
-      background: rgba(63, 185, 80, 0.15);
-      color: var(--success);
-    }
-
-    &.failed, &.canceled {
-      background: rgba(248, 81, 73, 0.15);
-      color: var(--danger);
-    }
-
-    &.paused {
-      background: rgba(210, 153, 34, 0.15);
-      color: var(--warning);
-    }
   }
 }
 
@@ -419,6 +431,53 @@ function formatTime(timestamp) {
   .icon {
     width: 14px;
     height: 14px;
+  }
+}
+
+// SSE断开指示器
+.sse-disconnected {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(210, 153, 34, 0.1);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--warning);
+
+  .warning-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--warning);
+    animation: pulse 1.5s infinite;
+  }
+
+  .warning-text {
+    font-size: 11px;
+  }
+}
+
+// 错误指示器
+.task-error-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(248, 81, 73, 0.1);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--danger);
+
+  .error-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+  }
+
+  .error-text {
+    font-size: 11px;
+    line-height: 1.4;
   }
 }
 

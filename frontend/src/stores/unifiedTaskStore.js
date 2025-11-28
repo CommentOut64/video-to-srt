@@ -149,8 +149,25 @@ export const useUnifiedTaskStore = defineStore('unifiedTask', () => {
       if (extraData.total !== undefined) task.total = extraData.total
       if (extraData.language) task.language = extraData.language
 
+      // 收到进度更新说明 SSE 连接正常
+      task.sseConnected = true
+      task.lastError = null  // 清除错误信息
+
       task.updatedAt = Date.now()
       // 进度更新频繁，不立即保存到 localStorage
+    }
+  }
+
+  /**
+   * 更新任务 SSE 连接状态
+   */
+  function updateTaskSSEStatus(jobId, connected, error = null) {
+    const task = tasksMap.value.get(jobId)
+    if (task) {
+      task.sseConnected = connected
+      if (error) task.lastError = error
+      else if (connected) task.lastError = null
+      task.updatedAt = Date.now()
     }
   }
 
@@ -274,17 +291,20 @@ export const useUnifiedTaskStore = defineStore('unifiedTask', () => {
         const existingTask = tasksMap.value.get(backendTask.id)
         if (existingTask) {
           // 更新现有任务（只更新关键字段）
-          Object.assign(existingTask, {
-            status: backendTask.status,
-            progress: backendTask.progress,
-            phase_percent: backendTask.phase_percent || 0,  // 新增
-            message: backendTask.message,
-            filename: backendTask.filename,
-            phase: backendTask.phase,  // 新增
-            language: backendTask.language,  // 新增
-            processed: backendTask.processed || 0,  // 新增
-            total: backendTask.total || 0  // 新增
-          }, { updatedAt: Date.now() })
+          existingTask.status = backendTask.status
+          existingTask.progress = backendTask.progress
+          existingTask.phase_percent = backendTask.phase_percent || 0
+          existingTask.message = backendTask.message
+          existingTask.filename = backendTask.filename
+          existingTask.phase = backendTask.phase
+          existingTask.language = backendTask.language
+          existingTask.processed = backendTask.processed || 0
+          existingTask.total = backendTask.total || 0
+          existingTask.updatedAt = Date.now()
+          // 如果任务正在处理中，标记为 SSE 待连接（等 SSE 连接后会更新为 true）
+          if (backendTask.status === 'processing') {
+            existingTask.sseConnected = false
+          }
           updatedCount++
         } else {
           // 添加新任务
@@ -436,6 +456,7 @@ export const useUnifiedTaskStore = defineStore('unifiedTask', () => {
     getTask,
     updateTaskStatus,
     updateTaskProgress,
+    updateTaskSSEStatus,
     updateTaskMessage,
     updateTask,
     loadTask,

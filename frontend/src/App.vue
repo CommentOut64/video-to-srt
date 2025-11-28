@@ -108,17 +108,25 @@ onMounted(async () => {
     onJobProgress(jobId, percent, data) {
       console.log(`[App] 任务 ${jobId} 进度:`, percent)
 
-      // 更新 store 中的任务进度（实时更新卡片）
-      taskStore.updateTaskProgress(jobId, percent, data.status)
-
-      // 更新消息
-      if (data.message) {
-        taskStore.updateTaskMessage(jobId, data.message)
-      }
+      // 更新 store 中的任务进度（实时更新卡片），传递完整数据
+      taskStore.updateTaskProgress(jobId, percent, data.status, {
+        phase: data.phase,
+        phase_percent: data.phase_percent,
+        message: data.message,
+        processed: data.processed,
+        total: data.total,
+        language: data.language
+      })
     },
 
     onConnected(data) {
       console.log('[App] 全局 SSE 连接成功:', data)
+      // 标记所有 processing 状态的任务为 SSE 已连接
+      taskStore.tasks.forEach(task => {
+        if (task.status === 'processing') {
+          taskStore.updateTaskSSEStatus(task.job_id, true)
+        }
+      })
     }
   })
 })

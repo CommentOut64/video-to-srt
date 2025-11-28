@@ -5,6 +5,7 @@
       :job-id="jobId"
       :task-name="projectName"
       :current-task-status="taskStatus"
+      :current-task-phase="taskPhase"
       :current-task-progress="taskProgress"
       :queue-completed="queueCompleted"
       :queue-total="queueTotal"
@@ -194,7 +195,7 @@ import { useRouter, onBeforeRouteLeave } from 'vue-router'
 import { useProjectStore } from '@/stores/projectStore'
 import { useUnifiedTaskStore } from '@/stores/unifiedTaskStore'
 import { mediaApi, transcriptionApi } from '@/services/api'
-import { sseService } from '@/services/sseService'
+import sseChannelManager from '@/services/sseChannelManager'
 import { useShortcuts } from '@/hooks/useShortcuts'
 
 // 组件导入
@@ -231,6 +232,7 @@ const loadError = ref(null)
 
 // 任务状态
 const taskStatus = ref(null)
+const taskPhase = ref('pending')  // 任务阶段
 const taskProgress = ref(0)
 const isTranscribing = ref(false)
 let sseUnsubscribe = null
@@ -301,6 +303,7 @@ async function loadProject() {
     console.log('[EditorView] 任务状态:', jobStatus)
 
     taskStatus.value = jobStatus.status
+    taskPhase.value = jobStatus.phase || 'pending'  // 获取任务阶段
     taskProgress.value = jobStatus.progress || 0
 
     // 设置元数据
@@ -415,68 +418,79 @@ function formatSRTTime(seconds) {
 // ========== SSE 实时更新 ==========
 
 function subscribeSSE() {
-  const sseUrl = `/api/stream/${props.jobId}`
-  console.log('[EditorView] 订阅 SSE:', sseUrl)
-  sseService.connect(sseUrl)
+  console.log('[EditorView] 订阅任务 SSE:', props.jobId)
 
-  const handleProgress = (data) => {
-    taskProgress.value = data.percent || 0
-    taskStatus.value = data.status
-    // 同步进度到 store，确保 TaskMonitor 实时更新
-    taskStore.updateTaskProgress(props.jobId, data.percent || 0, data.status)
-    if (data.message) {
-      taskStore.updateTaskMessage(props.jobId, data.message)
-    }
-  }
+  // 使用 sseChannelManager 订阅单任务频道
+  sseUnsubscribe = sseChannelManager.subscribeJob(props.jobId, {
+    onInitialState(data) {
+      console.log('[EditorView] 初始状态:', data)
+      if (data.percent !== undefined) {
+        taskProgress.value = data.percent
+      }
+      if (data.status) {
+        taskStatus.value = data.status
+      }
+      if (data.phase) {
+        taskPhase.value = data.phase
+      }
+    },
 
-  const handleSignal = async (data) => {
-    if (data.signal === 'job_complete') {
+    onProgress(data) {
+      taskProgress.value = data.percent || 0
+      taskStatus.value = data.status || taskStatus.value
+      taskPhase.value = data.phase || taskPhase.value
+
+      // 同步进度到 store，确保 TaskMonitor 实时更新
+      taskStore.updateTaskProgress(props.jobId, data.percent || 0, data.status, {
+        phase: data.phase,
+        phase_percent: data.phase_percent,
+        message: data.message,
+        processed: data.processed,
+        total: data.total,
+        language: data.language
+      })
+    },
+
+    async onComplete(data) {
+      console.log('[EditorView] 任务完成:', data)
       isTranscribing.value = false
       taskStatus.value = 'finished'
-      // 同步状态到 store
       taskStore.updateTaskStatus(props.jobId, 'finished')
       await loadCompletedSRT()
       stopProgressPolling()
-    } else if (data.signal === 'job_failed') {
+    },
+
+    onFailed(data) {
+      console.log('[EditorView] 任务失败:', data)
       taskStatus.value = 'failed'
       isTranscribing.value = false
-      // 同步状态到 store
       taskStore.updateTaskStatus(props.jobId, 'failed')
+      taskStore.updateTaskSSEStatus(props.jobId, true, data.message || '转录失败')
       stopProgressPolling()
+    },
+
+    onConnected() {
+      console.log('[EditorView] SSE 连接成功')
+      taskStore.updateTaskSSEStatus(props.jobId, true)
     }
-  }
-
-  const handleMessage = (msg) => {
-    if (msg.type === 'progress') handleProgress(msg.data)
-    if (msg.type === 'signal') handleSignal(msg.data)
-  }
-
-  sseService.on('progress', handleProgress)
-  sseService.on('signal', handleSignal)
-  sseService.on('message', handleMessage)
-
-  sseUnsubscribe = () => {
-    sseService.off('progress', handleProgress)
-    sseService.off('signal', handleSignal)
-    sseService.off('message', handleMessage)
-    sseService.disconnect()
-  }
+  })
 }
 
 function startProgressPolling() {
   stopProgressPolling()
-  // SSE 已实时推送进度，轮询仅作为保底机制，间隔调整为 15 秒
+  // 仅作为SSE失败时的备用方案，间隔延长到60秒
   progressPollTimer = setInterval(async () => {
     if (!isTranscribing.value) {
       stopProgressPolling()
       return
     }
+    // 轮询仅作为SSE断开时的兜底保障
     try {
       await loadTranscribingSegments()
     } catch (e) {
       console.warn('[EditorView] 轮询刷新失败:', e)
     }
-  }, 15000)
+  }, 60000)  // 改为60秒
 }
 
 function stopProgressPolling() {

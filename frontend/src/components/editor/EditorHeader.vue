@@ -35,7 +35,11 @@
             <div class="progress-track">
               <div class="progress-fill" :style="{ width: currentTaskProgress + '%' }"></div>
             </div>
-            <span class="capsule-text">转录中 {{ currentTaskProgress }}%</span>
+            <!-- 显示阶段和进度 -->
+            <span class="capsule-text">
+              <span class="phase-label" :style="{ color: phaseColor }">{{ phaseLabel }}</span>
+              {{ formatProgress(currentTaskProgress) }}%
+            </span>
           </div>
         </template>
 
@@ -150,11 +154,13 @@
  */
 import { computed } from 'vue'
 import TaskMonitor from './TaskMonitor/index.vue'
+import { PHASE_CONFIG, formatProgress } from '@/constants/taskPhases'
 
 const props = defineProps({
   jobId: { type: String, required: true },
   taskName: { type: String, default: '未命名项目' },
   currentTaskStatus: { type: String, default: 'idle' },      // 'processing', 'queued', 'finished', etc.
+  currentTaskPhase: { type: String, default: 'pending' },    // 任务阶段（transcribe, align, etc.）
   currentTaskProgress: { type: Number, default: 0 },         // 0-100
   queueCompleted: { type: Number, default: 0 },              // 已完成任务数
   queueTotal: { type: Number, default: 0 },                  // 总任务数
@@ -194,6 +200,16 @@ const metaText = computed(() => {
     return `自动保存于 ${time}`
   }
   return '准备就绪'
+})
+
+// 阶段标签
+const phaseLabel = computed(() => {
+  return PHASE_CONFIG[props.currentTaskPhase]?.label || '处理中'
+})
+
+// 阶段颜色
+const phaseColor = computed(() => {
+  return PHASE_CONFIG[props.currentTaskPhase]?.color || '#58a6ff'
 })
 
 // 处理导出
@@ -336,6 +352,11 @@ $header-h: 56px;
     font-size: 12px;
     color: var(--text-secondary);
     white-space: nowrap;
+
+    .phase-label {
+      font-weight: 600;
+      margin-right: 4px;
+    }
   }
 }
 
