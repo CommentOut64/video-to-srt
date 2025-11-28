@@ -610,6 +610,9 @@ class TranscriptionService:
         """
         job.phase = phase
 
+        # 计算阶段内进度（0-100，保留1位小数）
+        job.phase_percent = round(max(0.0, min(1.0, phase_ratio)) * 100, 1)
+
         # 使用配置中的进度权重
         phase_weights = config.PHASE_WEIGHTS
         total_weight = config.TOTAL_WEIGHT
@@ -622,7 +625,8 @@ class TranscriptionService:
             done_weight += w
 
         current_weight = phase_weights.get(phase, 0) * max(0.0, min(1.0, phase_ratio))
-        job.progress = round((done_weight + current_weight) / total_weight * 100, 2)
+        # 改为1位小数
+        job.progress = round((done_weight + current_weight) / total_weight * 100, 1)
 
         if message:
             job.message = message
@@ -633,6 +637,7 @@ class TranscriptionService:
     def _push_sse_progress(self, job: JobState):
         """
         推送SSE进度更新（线程安全）
+        同时推送到单任务频道和全局频道，确保 TaskMonitor 实时更新
 
         Args:
             job: 任务状态对象
@@ -642,22 +647,34 @@ class TranscriptionService:
             from services.sse_service import get_sse_manager
             sse_manager = get_sse_manager()
 
+            # 1. 推送到单任务频道（EditorView 使用）
             channel_id = f"job:{job.job_id}"
+            progress_data = {
+                "job_id": job.job_id,
+                "phase": job.phase,
+                "percent": job.progress,
+                "phase_percent": job.phase_percent,  # 新增：阶段内进度
+                "message": job.message,
+                "status": job.status,
+                "processed": job.processed,
+                "total": job.total,
+                "language": job.language or ""
+            }
+            sse_manager.broadcast_sync(channel_id, "progress", progress_data)
 
-            sse_manager.broadcast_sync(
-                channel_id,
-                "progress",
-                {
-                    "job_id": job.job_id,
-                    "phase": job.phase,
-                    "percent": job.progress,
-                    "message": job.message,
-                    "status": job.status,
-                    "processed": job.processed,
-                    "total": job.total,
-                    "language": job.language or ""
-                }
-            )
+            # 2. 推送到全局频道（TaskMonitor 使用）
+            global_progress_data = {
+                "id": job.job_id,  # 全局频道使用 "id"
+                "percent": job.progress,
+                "phase_percent": job.phase_percent,  # 新增：阶段内进度
+                "message": job.message,
+                "status": job.status,
+                "phase": job.phase,
+                "processed": job.processed,
+                "total": job.total
+            }
+            sse_manager.broadcast_sync("global", "job_progress", global_progress_data)
+
         except Exception as e:
             # SSE推送失败不应影响转录流程
             self.logger.debug(f"SSE推送失败: {e}")
@@ -682,10 +699,10 @@ class TranscriptionService:
                 "signal",
                 {
                     "job_id": job.job_id,
-                    "code": signal_code,
+                    "signal": signal_code,  # 统一使用 "signal" 字段
                     "message": message or job.message,
                     "status": job.status,
-                    "progress": job.progress
+                    "percent": job.progress
                 }
             )
         except Exception as e:

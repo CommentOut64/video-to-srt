@@ -45,6 +45,7 @@ class JobState:
     status: str = "queued"  # queued, processing, finished, failed, canceled, paused
     phase: str = "pending"  # extract, split, transcribe, srt
     progress: float = 0.0
+    phase_percent: float = 0.0  # 当前阶段内进度 (0-100)
     message: str = "等待开始"
     error: Optional[str] = None
     segments: List[Dict] = field(default_factory=list)

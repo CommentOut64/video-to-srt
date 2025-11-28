@@ -236,6 +236,8 @@ class JobQueueService:
                         # 推送队列变化和任务状态通知（在lock内，避免数据不一致）
                         self._notify_queue_change()
                         self._notify_job_status(job_id, "processing")
+                        # 推送初始进度（让前端立即知道任务的初始状态）
+                        self._notify_job_progress(job_id)
 
                 # 2. 如果没有任务，休眠后继续
                 if self.running_job_id is None:
@@ -282,9 +284,11 @@ class JobQueueService:
                         f"job:{job.job_id}",
                         "signal",
                         {
-                            "code": f"job_{job.status}",
+                            "signal": f"job_{job.status}",  # 统一使用 "signal" 字段
+                            "job_id": job.job_id,
                             "message": job.message,
-                            "status": job.status
+                            "status": job.status,
+                            "percent": round(job.progress, 1)
                         }
                     )
 
@@ -408,9 +412,10 @@ class JobQueueService:
         data = {
             "id": job_id,
             "status": status,
-            "progress": job.progress,
+            "percent": round(job.progress, 1),  # 统一字段名为 percent，保留1位小数
             "message": job.message,
             "filename": job.filename,
+            "phase": job.phase,  # 新增：阶段信息
             "timestamp": time.time()
         }
 
@@ -425,9 +430,10 @@ class JobQueueService:
 
         data = {
             "id": job_id,
-            "progress": job.progress,
-            "message": job.message,
+            "percent": round(job.progress, 1),  # 统一字段名为 percent，保留1位小数
             "phase": job.phase,
+            "phase_percent": round(job.phase_percent, 1),  # 新增：阶段内进度
+            "message": job.message,
             "processed": job.processed,
             "total": job.total,
             "timestamp": time.time()

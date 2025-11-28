@@ -422,17 +422,26 @@ function subscribeSSE() {
   const handleProgress = (data) => {
     taskProgress.value = data.percent || 0
     taskStatus.value = data.status
+    // 同步进度到 store，确保 TaskMonitor 实时更新
+    taskStore.updateTaskProgress(props.jobId, data.percent || 0, data.status)
+    if (data.message) {
+      taskStore.updateTaskMessage(props.jobId, data.message)
+    }
   }
 
   const handleSignal = async (data) => {
     if (data.signal === 'job_complete') {
       isTranscribing.value = false
       taskStatus.value = 'finished'
+      // 同步状态到 store
+      taskStore.updateTaskStatus(props.jobId, 'finished')
       await loadCompletedSRT()
       stopProgressPolling()
     } else if (data.signal === 'job_failed') {
       taskStatus.value = 'failed'
       isTranscribing.value = false
+      // 同步状态到 store
+      taskStore.updateTaskStatus(props.jobId, 'failed')
       stopProgressPolling()
     }
   }
@@ -456,6 +465,7 @@ function subscribeSSE() {
 
 function startProgressPolling() {
   stopProgressPolling()
+  // SSE 已实时推送进度，轮询仅作为保底机制，间隔调整为 15 秒
   progressPollTimer = setInterval(async () => {
     if (!isTranscribing.value) {
       stopProgressPolling()
@@ -466,7 +476,7 @@ function startProgressPolling() {
     } catch (e) {
       console.warn('[EditorView] 轮询刷新失败:', e)
     }
-  }, 5000)
+  }, 15000)
 }
 
 function stopProgressPolling() {
