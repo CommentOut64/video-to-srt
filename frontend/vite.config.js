@@ -1,40 +1,37 @@
-import { defineConfig } from "vite";
-import vue from "@vitejs/plugin-vue";
-import path from "path";
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import path from 'path'
 
-const backendPort = process.env.BACKEND_PORT || 8000;
-const backendHost = process.env.BACKEND_HOST || "127.0.0.1";
-
+// https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
   resolve: {
     alias: {
-      "@": path.resolve(process.cwd(), "src"),
-    },
+      '@': path.resolve(__dirname, 'src')
+    }
+  },
+  css: {
+    preprocessorOptions: {
+      scss: {
+        // 使用新版 Sass API，并注入全局 SCSS 变量
+        api: 'modern-compiler',
+        additionalData: `@use "@/styles/_variables" as *; @use "@/styles/_mixins" as *;`
+      }
+    }
   },
   server: {
-    port: 5174,
+    port: 5173,
     proxy: {
-      "/api": {
-        target: `http://${backendHost}:${backendPort}`,
-        changeOrigin: true,
-        ws: true,
-        secure: false,
-        configure: (proxy) => {
-          proxy.on("error", (err) => {
-            console.error("[proxy error]", err.message);
-          });
-          proxy.on("proxyReq", (proxyReq, req, res) => {
-            console.log(
-              "[proxy request]",
-              req.method,
-              req.url,
-              "->",
-              proxyReq.path
-            );
-          });
-        },
+      // 后端 API 代理
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true
       },
-    },
-  },
-});
+      // 媒体资源代理
+      '/media': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true
+      }
+    }
+  }
+})

@@ -1,38 +1,33 @@
-import { createApp } from "vue";
-import { createPinia } from "pinia";
-import App from "./App.vue";
-import "./style.css";
-import axios from "axios";
-import ElementPlus from 'element-plus';
-import 'element-plus/dist/index.css';
-import * as ElementPlusIconsVue from '@element-plus/icons-vue';
-import { useModelStore } from './stores/modelStore.js';
+/**
+ * 应用入口
+ */
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import ElementPlus from 'element-plus'
+import * as ElementPlusIconsVue from '@element-plus/icons-vue'
+import 'element-plus/dist/index.css'
+// 注意: 需要在 element-plus 之后导入自定义样式以覆盖默认样式
+import './styles/main.scss'
+import App from './App.vue'
+import router from './router'
 
-// 移除baseURL设置，让前端直接使用相对路径
-// const base = window.__API_BASE__ || "/api";
-// axios.defaults.baseURL = base;
+// 创建应用实例
+const app = createApp(App)
 
-const app = createApp(App);
+// 注册 Pinia 状态管理
+const pinia = createPinia()
+app.use(pinia)
 
-// 创建Pinia实例
-const pinia = createPinia();
+// 注册路由
+app.use(router)
 
-// 使用Pinia（必须在挂载App之前）
-app.use(pinia);
+// 注册 Element Plus
+app.use(ElementPlus)
 
-// 使用Element Plus
-app.use(ElementPlus);
-
-// 注册所有图标
+// 注册 Element Plus 图标
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component);
+  app.component(key, component)
 }
 
 // 挂载应用
-app.mount("#app");
-
-// 应用挂载后，初始化模型管理器（建立全局SSE连接）
-const modelStore = useModelStore();
-modelStore.initialize().catch(error => {
-  console.error('[App] 模型管理器初始化失败:', error);
-});
+app.mount('#app')

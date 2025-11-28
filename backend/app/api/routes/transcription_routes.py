@@ -4,6 +4,7 @@
 import os
 import uuid
 import shutil
+import time
 from typing import Optional
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Body
 from fastapi.responses import FileResponse, StreamingResponse
@@ -148,19 +149,84 @@ def create_transcription_router(
             input_path = file_service.get_input_file_path(filename)
             if not os.path.exists(input_path):
                 raise HTTPException(status_code=404, detail="文件不存在")
-            
+
             if not file_service.is_supported_file(filename):
                 raise HTTPException(status_code=400, detail="不支持的文件格式")
-            
+
             job_id = uuid.uuid4().hex
             settings = JobSettings()
             transcription_service.create_job(filename, input_path, settings, job_id=job_id)
-            
+
             return {"job_id": job_id, "filename": filename}
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"创建任务失败: {str(e)}")
+
+    @router.post("/create-jobs-batch")
+    async def create_jobs_batch(filenames: list = Body(..., embed=True)):
+        """
+        批量创建转录任务（从 input 目录选择多个文件）
+
+        Args:
+            filenames: 文件名列表
+
+        Returns:
+            {
+                "success": true,
+                "jobs": [{job_id, filename, queue_position}, ...],
+                "failed": [{filename, error}, ...],
+                "total": int,
+                "succeeded": int,
+                "failed_count": int
+            }
+        """
+        try:
+            queue_service = get_queue_service()
+            jobs = []
+            failed = []
+
+            for filename in filenames:
+                try:
+                    # 验证文件存在
+                    input_path = file_service.get_input_file_path(filename)
+                    if not os.path.exists(input_path):
+                        failed.append({"filename": filename, "error": "文件不存在"})
+                        continue
+
+                    # 验证文件格式
+                    if not file_service.is_supported_file(filename):
+                        failed.append({"filename": filename, "error": "不支持的文件格式"})
+                        continue
+
+                    # 创建任务
+                    job_id = uuid.uuid4().hex
+                    settings = JobSettings()
+                    job = transcription_service.create_job(filename, input_path, settings, job_id=job_id)
+
+                    # 加入队列
+                    queue_service.add_job(job)
+
+                    jobs.append({
+                        "job_id": job_id,
+                        "filename": filename,
+                        "queue_position": len(queue_service.queue)
+                    })
+
+                except Exception as e:
+                    failed.append({"filename": filename, "error": str(e)})
+
+            return {
+                "success": True,
+                "jobs": jobs,
+                "failed": failed,
+                "total": len(filenames),
+                "succeeded": len(jobs),
+                "failed_count": len(failed)
+            }
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"批量创建任务失败: {str(e)}")
 
     @router.post("/start")
     async def start_job(job_id: str = Form(...), settings: str = Form(...)):
@@ -366,30 +432,130 @@ def create_transcription_router(
         - job_progress: 任务进度更新
 
         注意:
-        - initial_state只返回精简列表（避免数据膨胀）
-        - 详细信息由前端按需查询
+        - initial_state返回所有任务（处理中 + 已完成）
+        - 避免客户端连接时漏掉完成任务的实时更新
         """
         queue_service = get_queue_service()
 
         def get_initial_state():
-            """返回精简版任务列表"""
+            """
+            返回所有任务列表（第二阶段修复：实时更新）
+            包含活跃任务 + 历史完成任务
+            """
+            from services.job_index_service import get_job_index_service
+            from core.config import config
+            from pathlib import Path
+            import json as json_module
+
+            jobs_summary = []
+
+            # 1. 添加活跃任务（从队列中）
             with queue_service.lock:
-                jobs_summary = []
                 for jid, job in queue_service.jobs.items():
                     jobs_summary.append({
                         "id": jid,
                         "status": job.status,
                         "progress": job.progress,
                         "filename": job.filename,
-                        "message": job.message
+                        "title": job.title if hasattr(job, 'title') else "",  # 用户自定义名称
+                        "message": job.message,
+                        "created_time": job.createdAt if hasattr(job, 'createdAt') else None,
+                        "phase": job.phase if hasattr(job, 'phase') else 'unknown'
                     })
 
-                return {
-                    "queue": list(queue_service.queue),
-                    "running": queue_service.running_job_id,
-                    "interrupted": queue_service.interrupted_job_id,
-                    "jobs": jobs_summary
-                }
+                queue_list = list(queue_service.queue)
+                running_id = queue_service.running_job_id
+                interrupted_id = queue_service.interrupted_job_id
+
+            # 2. 添加历史完成任务（从 jobs 目录）
+            try:
+                jobs_root = Path(config.JOBS_DIR)
+                job_index = get_job_index_service(config.JOBS_DIR)
+                active_job_ids = set(jid for jid, _ in queue_service.jobs.items())
+
+                for job_dir in jobs_root.iterdir():
+                    if not job_dir.is_dir():
+                        continue
+
+                    job_id = job_dir.name
+                    if job_id in active_job_ids:
+                        # 已在活跃任务中，跳过
+                        continue
+
+                    # 尝试找到文件名
+                    filename = "未知文件"
+                    file_path = job_index.get_file_path(job_id)
+                    if file_path:
+                        filename = os.path.basename(file_path)
+                    else:
+                        # 从目录中找视频文件
+                        for ext in ['.mp4', '.avi', '.mkv', '.mov', '.flv', '.wmv', '.mp3', '.wav', '.m4a']:
+                            matches = list(job_dir.glob(f"*{ext}"))
+                            if matches:
+                                filename = matches[0].name
+                                break
+
+                    # 检查是否完成
+                    srt_files = list(job_dir.glob("*.srt"))
+                    is_finished = len(srt_files) > 0
+
+                    # 获取创建时间
+                    try:
+                        stat = job_dir.stat()
+                        created_time = int(stat.st_ctime * 1000)
+                    except:
+                        created_time = None
+
+                    # 尝试从 checkpoint 获取进度
+                    progress = 100 if is_finished else 0
+                    phase = 'editing' if is_finished else 'transcribing'
+                    status = 'finished' if is_finished else 'processing'
+
+                    checkpoint_path = job_dir / "checkpoint.json"
+                    if checkpoint_path.exists():
+                        try:
+                            with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                                checkpoint_data = json_module.load(f)
+                                total_segments = checkpoint_data.get('total_segments', 0)
+                                processed_indices = checkpoint_data.get('processed_indices', [])
+                                if total_segments > 0:
+                                    progress = (len(processed_indices) / total_segments) * 100
+                                phase = checkpoint_data.get('phase', 'transcribing')
+                        except:
+                            pass
+
+                    # 尝试从 state.json 读取 title
+                    title = ""
+                    state_file = job_dir / "state.json"
+                    if state_file.exists():
+                        try:
+                            with open(state_file, 'r', encoding='utf-8') as f:
+                                state_data = json_module.load(f)
+                                title = state_data.get('title', '')
+                        except:
+                            pass
+
+                    jobs_summary.append({
+                        "id": job_id,
+                        "status": status,
+                        "progress": min(progress, 100),
+                        "filename": filename,
+                        "title": title,  # 用户自定义名称
+                        "message": "已完成" if is_finished else "处理中",
+                        "created_time": created_time,
+                        "phase": phase
+                    })
+
+            except Exception as e:
+                logger = logging.getLogger(__name__)
+                logger.warning(f"加载历史任务失败: {e}")
+
+            return {
+                "queue": queue_list,
+                "running": running_id,
+                "interrupted": interrupted_id,
+                "jobs": jobs_summary
+            }
 
         # 订阅SSE流，频道名为 "global"
         return StreamingResponse(
@@ -401,6 +567,131 @@ def create_transcription_router(
                 "X-Accel-Buffering": "no"
             }
         )
+
+    @router.get("/sync-tasks")
+    async def sync_tasks():
+        """
+        同步所有任务（第一阶段修复：数据同步）
+
+        返回所有任务列表（处理中 + 已完成），前端用此接口同步后端实际存在的任务
+        此接口为真实源，用于修复幽灵任务问题
+        """
+        from services.job_index_service import get_job_index_service
+        from core.config import config
+        from pathlib import Path
+        import json as json_module
+
+        queue_service = get_queue_service()
+        job_index = get_job_index_service(config.JOBS_DIR)
+        jobs_root = Path(config.JOBS_DIR)
+
+        # 清理无效映射（任务或文件不存在的映射）
+        job_index.cleanup_invalid_mappings()
+
+        # 收集所有任务
+        all_tasks = {}  # 使用 dict 避免重复，key 为 job_id
+
+        # 1. 队列中的任务（处理中或等待中）- 优先级最高
+        with queue_service.lock:
+            for job_id, job in queue_service.jobs.items():
+                all_tasks[job_id] = {
+                    "id": job.job_id,
+                    "filename": job.filename,
+                    "title": job.title if hasattr(job, 'title') else "",  # 用户自定义名称
+                    "status": job.status,
+                    "progress": job.progress,
+                    "message": job.message,
+                    "created_time": job.createdAt if hasattr(job, 'createdAt') else None,
+                    "phase": job.phase if hasattr(job, 'phase') else 'unknown'
+                }
+
+        # 2. 扫描 jobs 目录中的所有任务（包括已完成的）
+        try:
+            for job_dir in jobs_root.iterdir():
+                if not job_dir.is_dir():
+                    continue
+
+                job_id = job_dir.name
+                if job_id in all_tasks:
+                    # 已在队列中，跳过
+                    continue
+
+                # 尝试找到文件名
+                filename = "未知文件"
+
+                # 1. 从 job_index 查找
+                file_path = job_index.get_file_path(job_id)
+                if file_path:
+                    filename = os.path.basename(file_path)
+                else:
+                    # 2. 从目录中找视频文件
+                    for ext in ['.mp4', '.avi', '.mkv', '.mov', '.flv', '.wmv', '.mp3', '.wav', '.m4a']:
+                        matches = list(job_dir.glob(f"*{ext}"))
+                        if matches:
+                            filename = matches[0].name
+                            break
+
+                # 判断任务是否完成
+                srt_files = list(job_dir.glob("*.srt"))
+                is_finished = len(srt_files) > 0
+
+                # 获取创建时间
+                try:
+                    stat = job_dir.stat()
+                    created_time = int(stat.st_ctime * 1000)
+                except:
+                    created_time = None
+
+                # 尝试从 checkpoint 获取进度信息
+                checkpoint_path = job_dir / "checkpoint.json"
+                progress = 100 if is_finished else 0
+                phase = 'editing' if is_finished else 'transcribing'
+                status = 'finished' if is_finished else 'processing'
+
+                if checkpoint_path.exists():
+                    try:
+                        with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                            checkpoint_data = json_module.load(f)
+                            total_segments = checkpoint_data.get('total_segments', 0)
+                            processed_indices = checkpoint_data.get('processed_indices', [])
+                            if total_segments > 0:
+                                progress = (len(processed_indices) / total_segments) * 100
+                            phase = checkpoint_data.get('phase', 'transcribing')
+                    except:
+                        pass
+
+                # 尝试从 state.json 读取 title
+                title = ""
+                state_file = job_dir / "state.json"
+                if state_file.exists():
+                    try:
+                        with open(state_file, 'r', encoding='utf-8') as f:
+                            state_data = json_module.load(f)
+                            title = state_data.get('title', '')
+                    except:
+                        pass
+
+                all_tasks[job_id] = {
+                    "id": job_id,
+                    "filename": filename,
+                    "title": title,  # 用户自定义名称
+                    "status": status,
+                    "progress": min(progress, 100),  # 确保不超过100
+                    "message": "已完成" if is_finished else "处理中",
+                    "created_time": created_time,
+                    "phase": phase
+                }
+
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"扫描 jobs 目录失败: {e}")
+
+        return {
+            "success": True,
+            "tasks": list(all_tasks.values()),
+            "count": len(all_tasks),
+            "timestamp": int(time.time() * 1000)
+        }
 
     @router.get("/incomplete-jobs")
     async def get_incomplete_jobs():
@@ -804,5 +1095,69 @@ def create_transcription_router(
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"参数校验失败: {str(e)}")
+
+    @router.post("/rename-job/{job_id}")
+    async def rename_job(job_id: str, title: str = Body(..., embed=True)):
+        """
+        重命名任务
+
+        Args:
+            job_id: 任务ID
+            title: 新的任务名称（为空时恢复使用 filename）
+
+        Returns:
+            {
+                "success": bool,
+                "job_id": str,
+                "title": str,
+                "message": str
+            }
+        """
+        try:
+            # 从队列服务或转录服务获取任务
+            queue_service = get_queue_service()
+            job = queue_service.get_job(job_id)
+
+            if not job:
+                # 如果队列服务中没有，尝试从 jobs 目录恢复
+                job = transcription_service.get_job(job_id)
+
+            if not job:
+                raise HTTPException(status_code=404, detail="任务未找到")
+
+            # 更新 title 字段
+            job.title = title.strip() if title else ""
+
+            # 保存任务状态到文件
+            if job.dir:
+                from pathlib import Path
+                job_dir = Path(job.dir)
+                state_file = job_dir / "state.json"
+
+                try:
+                    state_data = job.to_dict()
+                    with open(state_file, 'w', encoding='utf-8') as f:
+                        json.dump(state_data, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    print(f"保存任务状态失败: {e}")
+
+            # 通知 SSE 订阅者任务信息已更新
+            sse_manager.broadcast_sync("global", "job_renamed", {
+                "job_id": job_id,
+                "title": job.title,
+                "filename": job.filename
+            })
+
+            return {
+                "success": True,
+                "job_id": job_id,
+                "title": job.title,
+                "message": "任务重命名成功"
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"重命名任务失败: {str(e)}")
 
     return router

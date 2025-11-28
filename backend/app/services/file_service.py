@@ -35,11 +35,13 @@ class FileManagementService:
                         'name': filename,
                         'size': stat.st_size,
                         'modified': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                        'modified_timestamp': int(stat.st_mtime * 1000),  # 添加时间戳（毫秒）
+                        'created_timestamp': int(stat.st_ctime * 1000),  # 添加创建时间戳（毫秒）
                         'path': file_path
                     })
-        
+
         # 按修改时间倒序排列
-        files.sort(key=lambda x: x['modified'], reverse=True)
+        files.sort(key=lambda x: x['modified_timestamp'], reverse=True)
         return files
 
     def delete_input_file(self, filename: str) -> bool:

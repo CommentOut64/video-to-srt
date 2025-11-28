@@ -1,0 +1,166 @@
+// ==============================================
+// 主题色彩系统 - 专业深色主题
+// 设计灵感：VS Code Dark+, GitHub Dark Dimmed, Figma Dark
+// ==============================================
+
+// 核心背景色 - 深邃而不刺眼的层次
+$bg-base: #0d1117;        // 最深背景
+$bg-primary: #161b22;     // 主背景
+$bg-secondary: #21262d;   // 次级背景/卡片
+$bg-tertiary: #30363d;    // 三级背景/悬停
+$bg-elevated: #2d333b;    // 浮层背景
+$bg-overlay: rgba(0, 0, 0, 0.5);  // 遮罩层
+
+// 文本色 - 柔和对比度
+$text-primary: #e6edf3;   // 主要文本
+$text-normal: #c9d1d9;    // 普通文本
+$text-secondary: #8b949e; // 次要文本
+$text-muted: #6e7681;     // 更弱的文本
+$text-disabled: #484f58;  // 禁用文本
+
+// 主题强调色 - 精心调配的色板
+$primary: #58a6ff;        // 主色（蓝）
+$primary-hover: #79c0ff;  // 主色悬停
+$primary-dim: #388bfd;    // 主色深色
+
+$success: #3fb950;        // 成功（绿）
+$success-dim: #238636;    // 成功深色
+
+$warning: #d29922;        // 警告（橙）
+$warning-dim: #9e6a03;    // 警告深色
+
+$danger: #f85149;         // 危险（红）
+$danger-dim: #da3633;     // 危险深色
+
+$purple: #a371f7;         // 紫色（特殊强调）
+$pink: #db61a2;           // 粉色
+
+// 边框色
+$border-default: #30363d;
+$border-muted: #21262d;
+$border-subtle: rgba(240, 246, 252, 0.1);
+
+// 波形配色 - 专业音频编辑器风格
+$waveform-color: #58a6ff;
+$waveform-progress: #238636;
+$waveform-cursor: #f85149;
+$region-default: rgba(88, 166, 255, 0.25);
+$region-active: rgba(88, 166, 255, 0.4);
+$region-selected: rgba(163, 113, 247, 0.35);
+
+// CSS 变量定义
+:root {
+  // 背景层次
+  --bg-base: #{$bg-base};
+  --bg-primary: #{$bg-primary};
+  --bg-secondary: #{$bg-secondary};
+  --bg-tertiary: #{$bg-tertiary};
+  --bg-elevated: #{$bg-elevated};
+  --bg-overlay: #{$bg-overlay};
+
+  // 文本层次
+  --text-primary: #{$text-primary};
+  --text-normal: #{$text-normal};
+  --text-secondary: #{$text-secondary};
+  --text-muted: #{$text-muted};
+  --text-disabled: #{$text-disabled};
+
+  // 兼容旧变量
+  --text-bright: #{$text-primary};
+
+  // 主题色
+  --primary: #{$primary};
+  --primary-hover: #{$primary-hover};
+  --primary-dim: #{$primary-dim};
+  --primary-rgb: 88, 166, 255;  // 用于 rgba() 颜色
+  --accent-blue: #{$primary};
+
+  --success: #{$success};
+  --success-dim: #{$success-dim};
+  --accent-green: #{$success};
+
+  --warning: #{$warning};
+  --warning-dim: #{$warning-dim};
+  --accent-orange: #{$warning};
+
+  --danger: #{$danger};
+  --danger-dim: #{$danger-dim};
+  --accent-red: #{$danger};
+
+  --purple: #{$purple};
+  --pink: #{$pink};
+
+  // 边框
+  --border-default: #{$border-default};
+  --border-muted: #{$border-muted};
+  --border-subtle: #{$border-subtle};
+  --border-light: rgba(48, 54, 61, 0.5);  // 更淡的边框色
+  --border-color: #{$border-default};
+
+  // 波形专用
+  --waveform-color: #{$waveform-color};
+  --waveform-progress: #{$waveform-progress};
+  --waveform-cursor: #{$waveform-cursor};
+  --region-default: #{$region-default};
+  --region-active: #{$region-active};
+  --region-selected: #{$region-selected};
+
+  // 阴影 - 精心设计的层次感
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 3px 6px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4), 0 3px 8px rgba(0, 0, 0, 0.3);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 16px rgba(88, 166, 255, 0.15);
+
+  // 圆角
+  --radius-xs: 3px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  // 过渡
+  --transition-fast: 0.1s ease;
+  --transition-normal: 0.2s ease;
+  --transition-slow: 0.3s ease;
+
+  // 字体
+  --font-mono: 'JetBrains Mono', 'SF Mono', Monaco, Consolas, monospace;
+}
+
+// ==============================================
+// 间距系统
+// ==============================================
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-md: 16px;
+$spacing-lg: 24px;
+$spacing-xl: 32px;
+$spacing-xxl: 48px;
+
+// ==============================================
+// 字体系统
+// ==============================================
+$font-family-base: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+$font-family-mono: "JetBrains Mono", "SF Mono", Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+$font-size-xs: 11px;
+$font-size-sm: 12px;
+$font-size-md: 14px;
+$font-size-lg: 16px;
+$font-size-xl: 20px;
+$font-size-xxl: 24px;
+$font-size-xxxl: 32px;
+
+// ==============================================
+// Z-Index 层级
+// ==============================================
+$z-dropdown: 100;
+$z-sticky: 200;
+$z-fixed: 300;
+$z-modal-backdrop: 400;
+$z-modal: 500;
+$z-popover: 600;
+$z-tooltip: 700;
+$z-notification: 800;
