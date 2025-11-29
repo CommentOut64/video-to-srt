@@ -6,13 +6,165 @@
     </div>
 
     <div class="task-list" v-if="filteredTasks.length > 0">
+      <!-- 可拖动的排队任务区域 -->
+      <draggable
+        v-model="queuedTasks"
+        :disabled="queuedTasks.length < 2"
+        item-key="job_id"
+        handle=".drag-handle"
+        ghost-class="task-item--ghost"
+        drag-class="task-item--dragging"
+        @end="onDragEnd"
+        class="draggable-list"
+      >
+        <template #item="{ element: task }">
+          <div
+            class="task-item is-queued"
+            :class="{
+              'is-current': task.job_id === currentJobId,
+              'is-finished': task.status === 'finished'
+            }"
+          >
+            <!-- 拖动手柄 -->
+            <div class="drag-handle" :title="queuedTasks.length >= 2 ? '拖动排序' : '单任务无法拖动'">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M11 18c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm-2-8c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
+              </svg>
+            </div>
+
+            <!-- 任务内容 -->
+            <div class="task-info">
+              <div class="task-header">
+                <span class="task-name" :title="task.title || task.filename">
+                  {{ task.title || task.filename }}
+                </span>
+                <!-- 使用阶段标签替代简单状态 -->
+                <span
+                  class="task-phase-tag"
+                  :style="{
+                    background: getPhaseStyle(task).bgColor,
+                    color: getPhaseStyle(task).color
+                  }"
+                >
+                  {{ getPhaseLabel(task) }}
+                </span>
+              </div>
+
+              <!-- 进度条 -->
+              <div v-if="['processing', 'queued', 'paused'].includes(task.status)" class="task-progress">
+                <div class="progress-bar">
+                  <div class="progress-fill" :style="{ width: task.progress + '%' }"></div>
+                </div>
+                <span class="progress-text">{{ formatProgress(task.progress) }}%</span>
+              </div>
+
+              <!-- SSE断开指示器 -->
+              <div v-if="!task.sseConnected && task.status === 'processing'" class="sse-disconnected">
+                <span class="warning-dot"></span>
+                <span class="warning-text">连接中断，等待重连...</span>
+              </div>
+
+              <!-- 错误指示器 -->
+              <div v-if="task.lastError && task.status !== 'failed'" class="task-error-indicator">
+                <svg class="error-icon" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                </svg>
+                <span class="error-text">{{ task.lastError }}</span>
+              </div>
+
+              <!-- 完成时间 -->
+              <div v-else-if="task.status === 'finished'" class="task-meta">
+                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/>
+                </svg>
+                <span>{{ formatTime(task.updatedAt) }}</span>
+              </div>
+
+              <!-- 失败原因 -->
+              <div v-else-if="task.status === 'failed'" class="task-error">
+                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                </svg>
+                <span>{{ task.message || '转录失败' }}</span>
+              </div>
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="task-actions">
+              <!-- 暂停按钮（仅处理中任务） -->
+              <button
+                v-if="task.status === 'processing'"
+                class="action-btn"
+                @click="pauseTask(task.job_id)"
+                title="暂停"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                </svg>
+              </button>
+
+              <!-- 恢复按钮（仅暂停任务） -->
+              <button
+                v-if="task.status === 'paused'"
+                class="action-btn action-btn--success"
+                @click="resumeTask(task.job_id)"
+                title="恢复"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M8 5v14l11-7z"/>
+                </svg>
+              </button>
+
+              <!-- 取消按钮（处理中、排队中或暂停） -->
+              <button
+                v-if="['processing', 'queued', 'paused'].includes(task.status)"
+                class="action-btn action-btn--danger"
+                @click="cancelTask(task.job_id)"
+                title="取消"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                </svg>
+              </button>
+
+              <!-- 打开编辑器按钮（已完成且非当前任务） -->
+              <button
+                v-if="task.status === 'finished' && task.job_id !== currentJobId"
+                class="action-btn action-btn--primary"
+                @click="openEditor(task.job_id)"
+                title="打开编辑器"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                </svg>
+              </button>
+
+              <!-- 从列表移除按钮（已完成任务） -->
+              <button
+                v-if="task.status === 'finished'"
+                class="action-btn"
+                @click="removeTask(task.job_id)"
+                title="从列表移除"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </template>
+      </draggable>
+
+      <!-- 非排队状态的任务（不可拖动） -->
       <div
-        v-for="task in filteredTasks"
+        v-for="task in nonQueuedTasks"
         :key="task.job_id"
         class="task-item"
         :class="{
           'is-current': task.job_id === currentJobId,
-          'is-finished': task.status === 'finished'
+          'is-finished': task.status === 'finished',
+          'is-processing': task.status === 'processing',
+          'is-paused': task.status === 'paused'
         }"
       >
         <!-- 任务信息 -->
@@ -165,12 +317,14 @@
  * - 暂停/取消进行中的任务
  * - 打开已完成任务的编辑器
  * - 清除已完成任务
+ * - 拖动排序队列中的任务
  */
-import { computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUnifiedTaskStore } from '@/stores/unifiedTaskStore'
 import { transcriptionApi } from '@/services/api'
 import { PHASE_CONFIG, STATUS_CONFIG, formatProgress } from '@/constants/taskPhases'
+import draggable from 'vuedraggable'
 
 const props = defineProps({
   currentJobId: { type: String, default: '' }
@@ -179,9 +333,17 @@ const props = defineProps({
 const router = useRouter()
 const taskStore = useUnifiedTaskStore()
 
+// 拖动排序相关状态
+const queuedTasks = ref([])
+
 // 过滤显示的任务（排除未创建的）
 const filteredTasks = computed(() => {
   return taskStore.tasks.filter(t => t.status !== 'created')
+})
+
+// 非排队状态的任务（不可拖动）
+const nonQueuedTasks = computed(() => {
+  return filteredTasks.value.filter(t => t.status !== 'queued')
 })
 
 // 是否有已完成的任务
@@ -193,6 +355,47 @@ const hasFinishedTasks = computed(() => {
 const finishedCount = computed(() => {
   return filteredTasks.value.filter(t => t.status === 'finished').length
 })
+
+// 监听 store 变化，更新可拖动列表
+watch(
+  () => taskStore.tasks,
+  (tasks) => {
+    queuedTasks.value = tasks.filter(t => t.status === 'queued')
+  },
+  { immediate: true, deep: true }
+)
+
+// 拖动结束处理
+async function onDragEnd(event) {
+  // 如果没有真正移动位置，直接返回
+  if (event.oldIndex === event.newIndex) {
+    return
+  }
+
+  // 获取新的任务ID顺序
+  const newOrder = queuedTasks.value.map(t => t.job_id)
+
+  console.log('[TaskMonitor] 队列重排:', {
+    from: event.oldIndex,
+    to: event.newIndex,
+    newOrder
+  })
+
+  try {
+    const result = await transcriptionApi.reorderQueue(newOrder)
+    if (!result.reordered) {
+      console.error('[TaskMonitor] 队列重排失败，恢复原顺序')
+      // 恢复原顺序
+      queuedTasks.value = taskStore.tasks.filter(t => t.status === 'queued')
+    } else {
+      console.log('[TaskMonitor] 队列重排成功')
+    }
+  } catch (error) {
+    console.error('[TaskMonitor] 队列重排请求失败:', error)
+    // 恢复原顺序
+    queuedTasks.value = taskStore.tasks.filter(t => t.status === 'queued')
+  }
+}
 
 // 获取阶段样式
 function getPhaseStyle(task) {
@@ -554,6 +757,73 @@ function formatTime(timestamp) {
         color: var(--danger);
       }
     }
+  }
+}
+
+// 拖动排序相关样式
+.draggable-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+// 拖动手柄
+.drag-handle {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: grab;
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: opacity 0.2s;
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  &:hover {
+    opacity: 1;
+    color: var(--text-secondary);
+  }
+
+  &:active {
+    cursor: grabbing;
+  }
+}
+
+// 拖动中的元素样式
+.task-item--dragging {
+  opacity: 0.9;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  transform: scale(1.02);
+  z-index: 100;
+}
+
+// 占位符样式
+.task-item--ghost {
+  opacity: 0.3;
+  background: var(--bg-tertiary);
+  border: 2px dashed var(--border-default);
+}
+
+// 排队中的任务显示拖动手柄
+.task-item.is-queued {
+  display: flex;
+  gap: 8px;
+
+  .drag-handle {
+    display: flex;
+  }
+}
+
+// 非排队任务隐藏拖动手柄（如果有的话）
+.task-item:not(.is-queued) {
+  .drag-handle {
+    display: none;
   }
 }
 
