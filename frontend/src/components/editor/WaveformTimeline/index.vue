@@ -105,6 +105,8 @@ const hasError = ref(false)
 const errorMessage = ref('')
 const isReady = ref(false)
 const isUpdatingRegions = ref(false)
+const retryCount = ref(0)  // 重试计数器
+const maxRetries = 3  // 最大重试次数
 
 // Wavesurfer实例
 let wavesurfer = null
@@ -194,6 +196,7 @@ function setupWavesurferEvents() {
   wavesurfer.on('ready', () => {
     isLoading.value = false
     isReady.value = true
+    retryCount.value = 0  // 成功加载后重置重试计数器
     renderSubtitleRegions()
     emit('ready')
   })
@@ -220,8 +223,24 @@ function setupWavesurferEvents() {
   wavesurfer.on('error', (error) => {
     console.error('Wavesurfer error:', error)
     hasError.value = true
-    errorMessage.value = '波形加载失败'
     isLoading.value = false
+
+    // 自动重试机制
+    if (retryCount.value < maxRetries) {
+      retryCount.value++
+      errorMessage.value = `波形加载失败，正在重试 (${retryCount.value}/${maxRetries})...`
+      console.log(`[WaveformTimeline] 自动重试 ${retryCount.value}/${maxRetries}`)
+
+      // 延迟1秒后重试
+      setTimeout(() => {
+        hasError.value = false
+        isLoading.value = true
+        loadAudioData()
+      }, 1000)
+    } else {
+      errorMessage.value = '波形加载失败，请手动重试'
+      console.error('[WaveformTimeline] 达到最大重试次数')
+    }
   })
 }
 
@@ -340,11 +359,12 @@ function fitToScreen() {
   }
 }
 
-// 重试加载
+// 重试加载（手动重试时重置计数器）
 function retryLoad() {
   hasError.value = false
   errorMessage.value = ''
   isLoading.value = true
+  retryCount.value = 0  // 手动重试时重置计数器
   loadAudioData()
 }
 

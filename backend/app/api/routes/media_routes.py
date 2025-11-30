@@ -105,8 +105,7 @@ def _serve_file_with_range(file_path: Path, request: Request, media_type: str):
 
 async def _get_video_resolution(video_path: Path) -> tuple:
     """使用FFprobe获取视频分辨率"""
-    ffmpeg_cmd = config.get_ffmpeg_command()
-    ffprobe_cmd = ffmpeg_cmd.replace('ffmpeg', 'ffprobe')
+    ffprobe_cmd = config.get_ffprobe_command()
 
     cmd = [
         ffprobe_cmd, '-v', 'error',
@@ -136,8 +135,7 @@ async def _get_video_resolution(video_path: Path) -> tuple:
 
 async def _get_video_duration(video_path: Path) -> float:
     """使用FFprobe获取视频时长"""
-    ffmpeg_cmd = config.get_ffmpeg_command()
-    ffprobe_cmd = ffmpeg_cmd.replace('ffmpeg', 'ffprobe')
+    ffprobe_cmd = config.get_ffprobe_command()
 
     # 检查视频文件是否存在
     if not video_path.exists():
@@ -296,7 +294,7 @@ def _generate_peaks_with_ffmpeg(audio_path: Path, samples: int = 2000) -> Tuple[
     适用于大文件（>100MB）
     """
     ffmpeg_cmd = config.get_ffmpeg_command()
-    ffprobe_cmd = ffmpeg_cmd.replace('ffmpeg', 'ffprobe')
+    ffprobe_cmd = config.get_ffprobe_command()
 
     # 获取音频时长
     probe_cmd = [
@@ -1127,9 +1125,13 @@ async def save_srt_content(job_id: str, request: Request):
 
 
 @router.get("/{job_id}/info")
-async def get_media_info(job_id: str):
+async def get_media_info(job_id: str, retry_missing: bool = True):
     """
-    获取任务的媒体信息摘要
+    获取任务的媒体信息摘要（支持自动重试生成缺失资源）
+
+    Args:
+        job_id: 任务ID
+        retry_missing: 是否在资源缺失时尝试重新生成（默认True）
 
     Returns:
         JSON: 包含视频、音频、SRT等文件的可用状态
@@ -1145,6 +1147,7 @@ async def get_media_info(job_id: str):
     peaks_cache = job_dir / "peaks_2000.json"
     sprite_cache = job_dir / "sprite_10.json"
     thumbnails_cache = job_dir / "thumbnails_10.json"
+    thumbnail_single = job_dir / "thumbnail.jpg"
 
     srt_file = None
     for file in job_dir.iterdir():
@@ -1158,6 +1161,33 @@ async def get_media_info(job_id: str):
     proxy_status = None
     if job_id in _proxy_generation_status:
         proxy_status = _proxy_generation_status[job_id]
+
+    # 智能重试：如果资源缺失且启用重试，则尝试异步生成
+    if retry_missing:
+        # 1. 如果波形数据缺失但音频文件存在，触发生成
+        if not peaks_cache.exists() and audio_file.exists():
+            try:
+                print(f"[media] 检测到波形数据缺失，尝试生成: {job_id}")
+                asyncio.create_task(_auto_generate_peaks(job_id, audio_file, peaks_cache))
+            except Exception as e:
+                print(f"[media] 波形数据生成失败: {e}")
+
+        # 2. 如果缩略图缺失但视频文件存在，触发生成
+        if not thumbnail_single.exists() and video_file:
+            try:
+                print(f"[media] 检测到缩略图缺失，尝试生成: {job_id}")
+                asyncio.create_task(_auto_generate_thumbnail(job_id, video_file, thumbnail_single))
+            except Exception as e:
+                print(f"[media] 缩略图生成失败: {e}")
+
+        # 3. 如果需要Proxy但不存在且未在生成中，触发生成
+        if needs_proxy and not proxy_video.exists():
+            if not (proxy_status and proxy_status.get("status") == "processing"):
+                try:
+                    print(f"[media] 检测到Proxy缺失，尝试生成: {job_id}")
+                    asyncio.create_task(_generate_proxy_video_with_progress(video_file, proxy_video, job_id))
+                except Exception as e:
+                    print(f"[media] Proxy视频生成失败: {e}")
 
     return JSONResponse({
         "job_id": job_id,
@@ -1177,13 +1207,17 @@ async def get_media_info(job_id: str):
         },
         "peaks": {
             "exists": peaks_cache.exists(),
+            "generating": not peaks_cache.exists() and audio_file.exists() and retry_missing,
             "url": f"/api/media/{job_id}/peaks" if audio_file.exists() else None
         },
         "thumbnails": {
             "exists": thumbnails_cache.exists() or sprite_cache.exists(),
             "sprite_exists": sprite_cache.exists(),
+            "single_exists": thumbnail_single.exists(),
+            "generating": not thumbnail_single.exists() and video_file and retry_missing,
             "url": f"/api/media/{job_id}/thumbnails" if video_file else None,
-            "sprite_url": f"/api/media/{job_id}/sprite.jpg" if sprite_cache.exists() else None
+            "sprite_url": f"/api/media/{job_id}/sprite.jpg" if sprite_cache.exists() else None,
+            "thumbnail_url": f"/api/media/{job_id}/thumbnail" if video_file else None
         },
         "srt": {
             "exists": srt_file is not None,
@@ -1191,3 +1225,78 @@ async def get_media_info(job_id: str):
             "url": f"/api/media/{job_id}/srt" if srt_file else None
         }
     })
+
+
+async def _auto_generate_peaks(job_id: str, audio_file: Path, peaks_cache: Path):
+    """自动生成波形数据（后台任务）"""
+    try:
+        file_size_mb = audio_file.stat().st_size / (1024 * 1024)
+        use_ffmpeg = file_size_mb > 50
+
+        if use_ffmpeg:
+            peaks, duration = _generate_peaks_with_ffmpeg(audio_file, 2000)
+        else:
+            peaks, duration = _generate_peaks_with_wave(audio_file, 2000)
+
+        # 如果FFmpeg失败，回退到wave
+        if not peaks and use_ffmpeg:
+            peaks, duration = _generate_peaks_with_wave(audio_file, 2000)
+
+        if peaks:
+            result = {
+                "peaks": peaks,
+                "duration": duration,
+                "method": "auto_ffmpeg" if use_ffmpeg else "auto_wave",
+                "samples": len(peaks) // 2
+            }
+            with open(peaks_cache, 'w') as f:
+                json.dump(result, f)
+            print(f"[media] 波形数据自动生成成功: {job_id}")
+    except Exception as e:
+        print(f"[media] 波形数据自动生成失败 [{job_id}]: {e}")
+
+
+async def _auto_generate_thumbnail(job_id: str, video_file: Path, thumbnail_file: Path):
+    """自动生成缩略图（后台任务）"""
+    try:
+        import base64
+
+        # 获取视频分辨率
+        width, height = await _get_video_resolution(video_file)
+
+        # 计算缩略图尺寸
+        if width > 3840:  # 4K视频
+            thumb_width = 1920
+        elif width > 1920:
+            thumb_width = width
+        elif width > 0:
+            thumb_width = width
+        else:
+            thumb_width = 1280
+
+        ffmpeg_cmd = config.get_ffmpeg_command()
+        cmd = [
+            ffmpeg_cmd,
+            '-ss', '1',
+            '-i', str(video_file),
+            '-vframes', '1',
+            '-f', 'image2pipe',
+            '-vcodec', 'mjpeg',
+            '-vf', f'scale={thumb_width}:-1',
+            '-q:v', '2',
+            '-'
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout:
+            with open(thumbnail_file, 'wb') as f:
+                f.write(result.stdout)
+            print(f"[media] 缩略图自动生成成功: {job_id} (宽度: {thumb_width}px)")
+    except Exception as e:
+        print(f"[media] 缩略图自动生成失败 [{job_id}]: {e}")
+

@@ -260,19 +260,59 @@ class SSEChannelManager extends EventEmitter {
         })
       }
 
+      // 连接成功
+      eventSource.onopen = () => {
+        console.log(`[SSE ${channelId}] 连接成功`)
+        // 清除重连状态
+        this.reconnectState.delete(channelId)
+      }
+
       // 错误处理
       eventSource.onerror = (error) => {
         console.error(`[SSE ${channelId}] 连接错误:`, error)
 
-        // 检查连接状态
-        if (eventSource.readyState === EventSource.CLOSED) {
-          console.warn(`[SSE ${channelId}] 连接已关闭，尝试重连`)
-          this._scheduleReconnect(channelId)
+        // 关键修复：检查HTTP状态码，如果是404等客户端错误，不重连
+        // EventSource 在404时会触发error事件，但不会暴露status code
+        // 我们可以通过readyState判断，如果是CLOSED则可能是不可恢复错误
+        const readyState = eventSource.readyState
+
+        // 对于job频道，如果连接失败，先尝试验证任务是否存在
+        if (channelId.startsWith('job:') && readyState === EventSource.CLOSED) {
+          const jobId = channelId.split(':')[1]
+
+          // 尝试调用一个轻量级API验证任务是否存在
+          fetch(`${this.baseURL}/api/status/${jobId}`)
+            .then(res => {
+              if (res.status === 404) {
+                console.error(`[SSE ${channelId}] 任务不存在，停止重连`)
+                // 清理资源，不再重连
+                this.channels.delete(channelId)
+                this.channelConfigs.delete(channelId)
+                this.reconnectState.delete(channelId)
+                if (eventSource) eventSource.close()
+                return
+              }
+
+              // 任务存在但连接失败，进行重连
+              if (readyState === EventSource.CLOSED) {
+                console.warn(`[SSE ${channelId}] 连接已关闭但任务存在，尝试重连`)
+                this._scheduleReconnect(channelId)
+              }
+            })
+            .catch(() => {
+              // 验证请求失败，也进行重连（可能是网络问题）
+              if (readyState === EventSource.CLOSED) {
+                this._scheduleReconnect(channelId)
+              }
+            })
+        } else {
+          // 其他频道或readyState不是CLOSED，正常重连
+          if (readyState === EventSource.CLOSED) {
+            console.warn(`[SSE ${channelId}] 连接已关闭，尝试重连`)
+            this._scheduleReconnect(channelId)
+          }
         }
       }
-
-      // 清除重连状态
-      this.reconnectState.delete(channelId)
 
     } catch (error) {
       console.error(`[SSE ${channelId}] 创建连接失败:`, error)

@@ -93,6 +93,8 @@ const errorMessage = ref('')
 const canRetry = ref(false)
 const isFullscreen = ref(false)
 const lastSyncTime = ref(0)
+const retryCount = ref(0)  // 重试计数器
+const maxRetries = 3  // 最大重试次数
 
 // 状态提示（短暂显示播放/暂停图标）
 const showStateHint = ref(false)
@@ -169,6 +171,7 @@ function onMetadataLoaded() {
   projectStore.meta.duration = video.duration
   video.playbackRate = projectStore.player.playbackRate
   video.volume = projectStore.player.volume
+  retryCount.value = 0  // 成功加载后重置重试计数器
   emit('loaded', video.duration)
   if (props.autoPlay) togglePlay()
 }
@@ -205,21 +208,40 @@ function onError() {
   const video = videoRef.value
   hasError.value = true
   const error = video?.error
+
   if (error) {
     switch (error.code) {
-      case 1: errorMessage.value = '视频加载被中止'; break
+      case 1: errorMessage.value = '视频加载被中止'; canRetry.value = true; break
       case 2: errorMessage.value = '网络错误'; canRetry.value = true; break
-      case 3: errorMessage.value = '视频解码失败'; break
-      case 4: errorMessage.value = '不支持的视频格式'; break
-      default: errorMessage.value = '未知错误'
+      case 3: errorMessage.value = '视频解码失败'; canRetry.value = true; break
+      case 4: errorMessage.value = '不支持的视频格式'; canRetry.value = false; break
+      default: errorMessage.value = '未知错误'; canRetry.value = true
     }
   }
+
+  // 自动重试机制（仅在可重试的错误类型下）
+  if (canRetry.value && retryCount.value < maxRetries) {
+    retryCount.value++
+    console.log(`[VideoStage] 视频加载失败，自动重试 ${retryCount.value}/${maxRetries}`)
+    errorMessage.value = `${errorMessage.value}，正在重试 (${retryCount.value}/${maxRetries})...`
+
+    // 延迟2秒后重试
+    setTimeout(() => {
+      hasError.value = false
+      videoRef.value?.load()
+    }, 2000)
+  } else if (retryCount.value >= maxRetries) {
+    console.error('[VideoStage] 达到最大重试次数')
+    errorMessage.value = `${errorMessage.value}，请手动重试`
+  }
+
   emit('error', new Error(errorMessage.value))
 }
 
 function retryLoad() {
   hasError.value = false
   errorMessage.value = ''
+  retryCount.value = 0  // 手动重试时重置计数器
   videoRef.value?.load()
 }
 

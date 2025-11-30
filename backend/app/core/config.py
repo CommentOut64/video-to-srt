@@ -136,6 +136,22 @@ class ProjectConfig:
             # 回退到系统命令
             return "ffmpeg"
 
+    def get_ffprobe_command(self) -> str:
+        """
+        获取FFprobe命令
+        优先使用项目内的FFprobe，支持独立打包
+
+        Returns:
+            str: FFprobe可执行文件路径
+        """
+        ffprobe_exe = self.FFMPEG_DIR / "ffprobe.exe"
+        if ffprobe_exe.exists():
+            # 使用项目内的FFprobe
+            return str(ffprobe_exe)
+        else:
+            # 回退到系统命令
+            return "ffprobe"
+
     def get_audio_config(self) -> dict:
         """获取音频处理配置"""
         return {
