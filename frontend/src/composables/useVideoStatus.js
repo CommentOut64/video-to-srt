@@ -169,6 +169,8 @@ export function useVideoStatus(jobId) {
    * 处理Proxy完成事件（由父组件调用）
    */
   function handleProxyComplete(data) {
+    console.log('[useVideoStatus] 收到Proxy完成事件，完整数据:', data)
+
     proxy720p.value.exists = true
     proxy720p.value.url = data.video_url || currentUrl.value
     proxy720p.value.progress = 100
@@ -179,7 +181,11 @@ export function useVideoStatus(jobId) {
     currentResolution.value = '720p'
     currentStage.value = VIDEO_STAGES.HIGH_QUALITY
 
-    console.log('[useVideoStatus] 720p 高清视频已就绪:', proxy720p.value.url)
+    console.log('[useVideoStatus] 720p 高清视频已就绪:', {
+      url: proxy720p.value.url,
+      currentUrl: currentUrl.value,
+      resolution: currentResolution.value
+    })
   }
 
   /**

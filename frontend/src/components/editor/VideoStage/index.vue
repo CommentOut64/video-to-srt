@@ -10,7 +10,7 @@
           <p>{{ transcodingMessage }}</p>
           <div v-if="transcodingProgress > 0 && transcodingProgress < 100" class="progress-bar">
             <div class="progress-fill" :style="{ width: transcodingProgress + '%' }"></div>
-            <span>{{ transcodingProgress }}%</span>
+            <span>{{ transcodingProgress.toFixed(1) }}%</span>
           </div>
         </div>
       </transition>
@@ -277,10 +277,17 @@ watch(() => projectStore.player.volume, (volume) => {
 // 监听视频源变化（渐进式加载升级时）
 watch(() => props.progressiveUrl, async (newUrl, oldUrl) => {
   if (newUrl && newUrl !== oldUrl) {
-    console.log('[VideoStage] 视频源变更:', newUrl, 'resolution:', props.currentResolution)
+    console.log('[VideoStage] 检测到视频源变更:', {
+      oldUrl,
+      newUrl,
+      resolution: props.currentResolution
+    })
 
     const video = videoRef.value
-    if (!video) return
+    if (!video) {
+      console.warn('[VideoStage] 视频元素不存在，跳过加载')
+      return
+    }
 
     // 保存当前播放状态
     const currentTime = video.currentTime || 0

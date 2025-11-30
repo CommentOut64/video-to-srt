@@ -545,13 +545,13 @@ function subscribeSSE() {
 
     // 新增：视频生成进度
     onProxyProgress(data) {
-      console.log('[EditorView] Proxy生成进度:', data.progress)
+      console.log('[EditorView] 收到SSE Proxy进度事件:', data.progress)
       videoStatus.handleProxyProgress(data)
     },
 
     // 新增：视频生成完成
     onProxyComplete(data) {
-      console.log('[EditorView] Proxy生成完成:', data.video_url)
+      console.log('[EditorView] 收到SSE Proxy完成事件，完整数据:', data)
       videoStatus.handleProxyComplete(data)
     }
   })

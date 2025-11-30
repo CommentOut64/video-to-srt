@@ -315,14 +315,22 @@ def _push_proxy_progress(job_id: str, progress: float, completed: bool = False):
         channel_id = f"job:{job_id}"
         event_type = "proxy_complete" if completed else "proxy_progress"
 
+        # 构建事件数据
+        data = {
+            "job_id": job_id,
+            "progress": progress,
+            "completed": completed
+        }
+
+        # 如果是完成事件，添加视频URL（关键修复！）
+        if completed:
+            data["video_url"] = f"/api/media/{job_id}/video"
+            print(f"[media] 推送Proxy完成事件，video_url: {data['video_url']}")
+
         sse_manager.broadcast_sync(
             channel_id,
             event_type,
-            {
-                "job_id": job_id,
-                "progress": progress,
-                "completed": completed
-            }
+            data
         )
     except Exception as e:
         # SSE推送失败不影响Proxy生成
