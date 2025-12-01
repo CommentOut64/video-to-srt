@@ -1073,7 +1073,7 @@ onBeforeRouteLeave(async (to, from) => {
 // 舞台列 (三明治结构: 视频 + 控制 + 波形)
 .stage-column {
   display: grid;
-  grid-template-rows: 1fr 48px 160px;
+  grid-template-rows: 1fr 48px 200px;  // 波形区域调整为200px（header+刻度+波形+滚动条）
   background: #000;
   min-width: 0;
   overflow: hidden;
