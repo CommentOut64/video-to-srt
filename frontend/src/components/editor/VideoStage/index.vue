@@ -27,6 +27,8 @@
         @pause="onPause"
         @ended="onEnded"
         @error="onError"
+        @seeking="onSeeking"
+        @seeked="onSeeked"
         @waiting="isBuffering = true"
         @canplay="isBuffering = false"
         @progress="onProgress"
@@ -90,6 +92,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useProjectStore } from '@/stores/projectStore'
+import { usePlaybackManager } from '@/services/PlaybackManager'
 
 // Props
 const props = defineProps({
@@ -112,6 +115,9 @@ const emit = defineEmits(['loaded', 'error', 'play', 'pause', 'timeupdate', 'end
 // Store
 const projectStore = useProjectStore()
 
+// 全局播放管理器（单例）
+const playbackManager = usePlaybackManager()
+
 // Refs
 const videoRef = ref(null)
 const containerRef = ref(null)
@@ -122,7 +128,6 @@ const hasError = ref(false)
 const errorMessage = ref('')
 const canRetry = ref(false)
 const isFullscreen = ref(false)
-const lastSyncTime = ref(0)
 const retryCount = ref(0)
 const maxRetries = 3
 const showProgressiveHint = ref(false)
@@ -133,19 +138,6 @@ const showStateHint = ref(false)
 const stateHintType = ref('')
 const stateHintText = ref('')
 let stateHintTimer = null
-let timeUpdateTimer = null  // 时间更新防抖定时器
-
-// 防抖的时间更新函数
-function debouncedTimeUpdate(time) {
-  if (timeUpdateTimer) clearTimeout(timeUpdateTimer)
-  timeUpdateTimer = setTimeout(() => {
-    // 只有当时间差较大时才更新（避免循环触发）
-    if (Math.abs(projectStore.player.currentTime - time) > 0.2) {
-      lastSyncTime.value = Date.now()  // 设置同步标记
-      projectStore.player.currentTime = time
-    }
-  }, 200)  // 增加到200ms防抖，减少更新频率
-}
 
 // Computed
 const videoSource = computed(() => {
@@ -247,22 +239,15 @@ watch(() => projectStore.player.isPlaying, async (playing) => {
   }
 })
 
-// 监听 Store 时间变化（外部跳转）
-watch(() => projectStore.player.currentTime, (newTime) => {
-  if (!videoRef.value) return
-  const now = Date.now()
+// 【重要】监听 Store 时间变化：由 PlaybackManager 统一处理
+// VideoStage 不需要在这里做额外的时间同步，因为 PlaybackManager.seekTo() 会直接操作 videoElement
 
-  // 防止循环同步：如果刚刚由video更新了Store，则跳过
-  if (now - lastSyncTime.value < 300) return
-
-  // 只有当时间差较大时才seek（避免小抖动）
-  const timeDiff = Math.abs(videoRef.value.currentTime - newTime)
-  if (timeDiff > 0.5) {
-    videoRef.value.currentTime = newTime
-    lastSyncTime.value = now
-    console.log(`[VideoStage] 外部跳转: ${newTime.toFixed(2)}s (diff: ${timeDiff.toFixed(2)}s)`)
+// 【重要】监听 videoRef 变化，确保 Video 元素注册到 PlaybackManager
+watch(videoRef, (video) => {
+  if (video) {
+    playbackManager.registerVideo(video)
   }
-})
+}, { immediate: true })
 
 // 监听播放速度
 watch(() => projectStore.player.playbackRate, (rate) => {
@@ -357,13 +342,13 @@ function onMetadataLoaded() {
   video.volume = projectStore.player.volume
   retryCount.value = 0
   emit('loaded', video.duration)
-  if (props.autoPlay) togglePlay()
+  if (props.autoPlay) playbackManager.togglePlay()
 }
 
 function onTimeUpdate() {
   const video = videoRef.value
-  // 使用防抖更新 Store 时间（减少高频更新）
-  debouncedTimeUpdate(video.currentTime)
+  // 【重要】时间更新由 PlaybackManager 内部通过事件监听处理
+  // 这里只负责发射事件通知外部
   emit('timeupdate', video.currentTime)
 }
 
@@ -384,6 +369,14 @@ function onEnded() {
 
 function onProgress() {
   // 可以计算缓冲进度
+}
+
+function onSeeking() {
+  // PlaybackManager 内部处理
+}
+
+function onSeeked() {
+  // PlaybackManager 内部处理
 }
 
 function onError() {
@@ -445,14 +438,14 @@ function retryLoad() {
 
 // 控制方法
 function togglePlay() {
-  projectStore.player.isPlaying = !projectStore.player.isPlaying
+  playbackManager.togglePlay()
 }
 
 function seek(seconds) {
   const video = videoRef.value
   if (!video) return
   const newTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds))
-  projectStore.seekTo(newTime)
+  playbackManager.seekTo(newTime)
 }
 
 function toggleFullscreen() {
@@ -516,6 +509,11 @@ function handleContainerClick(e) {
 onMounted(() => {
   document.addEventListener('keydown', handleKeyboard)
   document.addEventListener('fullscreenchange', handleFullscreenChange)
+  
+  // 【关键】注册 Video 元素到 PlaybackManager
+  if (videoRef.value) {
+    playbackManager.registerVideo(videoRef.value)
+  }
 })
 
 onUnmounted(() => {
@@ -523,8 +521,10 @@ onUnmounted(() => {
   document.removeEventListener('fullscreenchange', handleFullscreenChange)
   clearTimeout(stateHintTimer)
   clearTimeout(progressiveHintTimer)
-  clearTimeout(timeUpdateTimer)  // 清理时间更新防抖定时器
   if (clickTimer) clearTimeout(clickTimer)
+  
+  // 【关键】注销 Video 元素
+  playbackManager.unregisterVideo()
 })
 </script>
 

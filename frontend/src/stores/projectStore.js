@@ -58,6 +58,7 @@ export const useProjectStore = defineStore("project", () => {
     isPlaying: false, // 是否正在播放
     playbackRate: 1.0, // 播放速度（0.5-4.0）
     volume: 1.0, // 音量（0.0-1.0）
+    isSeeking: false, // 全局Seek锁：标记用户是否正在主动跳转（解决进度条拖动循环问题）
   });
 
   // ========== 5. 视图状态 ==========
@@ -370,6 +371,7 @@ export const useProjectStore = defineStore("project", () => {
       isPlaying: false,
       playbackRate: 1.0,
       volume: 1.0,
+      isSeeking: false,
     };
     clearHistory();
     console.log("[ProjectStore] 项目已重置");

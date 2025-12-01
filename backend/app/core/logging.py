@@ -91,6 +91,9 @@ def setup_logging():
         logging.getLogger(logger_name).setLevel(logging.WARNING)
         logging.getLogger(logger_name).addFilter(ThirdPartyFilter())
 
+    # 禁用 uvicorn 的访问日志（INFO级别的请求日志）
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
     logger = logging.getLogger(__name__)
     logger.info(f"Logging system initialized - level: {config.LOG_LEVEL}")
     logger.info(f"Log file: {config.LOG_FILE}")

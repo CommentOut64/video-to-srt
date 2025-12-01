@@ -12,6 +12,7 @@
 虽然波形渲染可能是瓶颈，但**快速拖拽不跟手的主要原因是**：
 
 #### 1. **`updateScrollbarThumb()` 计算复杂度高**（最主要原因）
+
 ```javascript
 function updateScrollbarThumb() {
   // 每次拖拽的mousemove事件都要调用此函数

@@ -1,5 +1,5 @@
 <template>
-  <div class="waveform-timeline" ref="containerRef">
+  <div class="waveform-timeline" ref="containerRef" tabindex="-1" @keydown.space.prevent="handleSpaceKey">
     <!-- 缩放控制栏 -->
     <div class="timeline-header">
       <div class="zoom-controls">
@@ -94,6 +94,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { useProjectStore } from "@/stores/projectStore";
+import { usePlaybackManager } from "@/services/PlaybackManager";
 
 // ============ 缩放配置常量 ============
 const ZOOM_MIN = 20; // 最小缩放 20%
@@ -128,6 +129,9 @@ const emit = defineEmits([
 // Store
 const projectStore = useProjectStore();
 
+// 全局播放管理器（单例）
+const playbackManager = usePlaybackManager();
+
 // Refs
 const containerRef = ref(null);
 const waveformRef = ref(null);
@@ -144,10 +148,6 @@ const isReady = ref(false);
 const isUpdatingRegions = ref(false);
 const retryCount = ref(0); // 重试计数器
 const maxRetries = 3; // 最大重试次数
-
-// 智能跟随状态
-const isUserSeeking = ref(false); // 标记用户是否正在主动跳转
-let lastSyncTime = 0; // 上次同步时间戳（避免频繁同步）
 
 // 自定义交互状态
 const cursorDragMode = ref("hover-only"); // 'hover-only' | 'anywhere'
@@ -318,6 +318,13 @@ function setupWavesurferEvents() {
     isReady.value = true;
     retryCount.value = 0; // 成功加载后重置重试计数器
 
+    // 【关键修复】防止 WaveSurfer 的 audio 元素获取焦点，导致空格键被浏览器拦截
+    // 为 audio 元素设置 tabIndex = -1，使其不可通过 Tab 键聚焦
+    const audioElement = wavesurfer.getMediaElement();
+    if (audioElement) {
+      audioElement.setAttribute('tabindex', '-1');
+    }
+
     // 音频加载完成后，根据实际时长重新调整配置
     const actualDuration = wavesurfer.getDuration();
     const containerWidth = containerRef.value?.offsetWidth || 800;
@@ -338,6 +345,9 @@ function setupWavesurferEvents() {
 
     renderSubtitleRegions();
     emit("ready");
+
+    // 【关键】注册 WaveSurfer 到 PlaybackManager
+    playbackManager.registerWaveSurfer(wavesurfer);
 
     // 【关键】初始化滚动条显示
     nextTick(() => {
@@ -703,6 +713,13 @@ function handleUpperZoneMouseDown(e) {
   e.preventDefault();
   e.stopPropagation();
 
+  // 【关键修复】点击后强制将焦点移到一个可聚焦的容器元素上
+  // 而不是 body，因为 body.focus() 在某些浏览器中不可靠
+  // 我们使用 containerRef（波形容器），并确保它可聚焦
+  if (containerRef.value) {
+    containerRef.value.focus();
+  }
+
   // 检查是否允许拖拽
   let canDrag = false;
 
@@ -712,34 +729,24 @@ function handleUpperZoneMouseDown(e) {
     canDrag = isMouseNearCursor(e.clientX, 10);
   }
 
+  const clickTime = getTimeFromClientX(e.clientX);
+
   if (canDrag) {
     // 开始拖拽光标
     isDraggingCursor.value = true;
     cursorDragStartTime = projectStore.player.currentTime;
 
-    // 立即跳转到点击位置
-    const clickTime = getTimeFromClientX(e.clientX);
-    isUserSeeking.value = true;
-    projectStore.seekTo(clickTime);
+    // 使用 PlaybackManager 进行拖拽
+    playbackManager.startDragging('waveformCursor');
+    playbackManager.updateDragging(clickTime);
     emit("seek", clickTime);
 
-    // 添加全局移动和释放监听
     document.addEventListener("mousemove", handleCursorDragMove);
     document.addEventListener("mouseup", handleCursorDragEnd);
-
-    setTimeout(() => {
-      isUserSeeking.value = false;
-    }, 200);
   } else {
-    // hover-only 模式下，不在光标附近，只点击跳转，不拖拽
-    const clickTime = getTimeFromClientX(e.clientX);
-    isUserSeeking.value = true;
-    projectStore.seekTo(clickTime);
+    // 单击跳转（非拖拽）
+    playbackManager.seekTo(clickTime);
     emit("seek", clickTime);
-
-    setTimeout(() => {
-      isUserSeeking.value = false;
-    }, 200);
   }
 }
 
@@ -772,7 +779,7 @@ function handleCursorDragMove(e) {
   if (!isDraggingCursor.value) return;
 
   const newTime = getTimeFromClientX(e.clientX);
-  projectStore.seekTo(newTime);
+  playbackManager.updateDragging(newTime);
   emit("seek", newTime);
 }
 
@@ -784,6 +791,16 @@ function handleCursorDragEnd() {
 
   document.removeEventListener("mousemove", handleCursorDragMove);
   document.removeEventListener("mouseup", handleCursorDragEnd);
+
+  // 使用 PlaybackManager 结束拖拽
+  playbackManager.stopDragging();
+}
+
+/**
+ * 空格键处理：切换播放/暂停
+ */
+function handleSpaceKey() {
+  playbackManager.togglePlay();
 }
 
 /**
@@ -954,30 +971,35 @@ watch(
   }
 );
 
-// 监听时间变化（优化：只在用户主动seek时同步，避免播放时频繁同步）
+// 监听时间变化（优化：使用 PlaybackManager 的状态判断）
 watch(
   () => projectStore.player.currentTime,
   (newTime) => {
     if (!wavesurfer || !isReady.value) return;
 
-    // 播放时不要同步（避免闪现），让 WaveSurfer 自己播放
-    if (projectStore.player.isPlaying && !isUserSeeking.value) {
+    // 【重要】播放时不同步（让 WaveSurfer 自己播放），除非：
+    // 1. 正在拖拽（用户主动操作）
+    // 2. 正在 seeking
+    const isPlaying = projectStore.player.isPlaying;
+    const isSeeking = playbackManager.isLocked();
+    
+    if (isPlaying && !isSeeking) {
       return;
     }
 
-    // 节流：避免过于频繁的同步（最少间隔100ms）
+    // 节流：避免过于频繁的同步（最少间隔50ms）
     const now = Date.now();
-    if (now - lastSyncTime < 100) {
+    if (now - lastSyncTime < 50) {
       return;
     }
     lastSyncTime = now;
 
-    // 只在暂停状态或用户主动跳转时才同步
+    // 检查时间差异
     const currentWsTime = wavesurfer.getCurrentTime();
     const timeDiff = Math.abs(currentWsTime - newTime);
 
-    // 如果时间差异超过0.2秒，才进行同步
-    if (timeDiff > 0.2) {
+    // 如果时间差异超过0.1秒，进行同步
+    if (timeDiff > 0.1) {
       const duration = wavesurfer.getDuration();
       if (duration > 0) {
         wavesurfer.seekTo(newTime / duration);
@@ -1088,6 +1110,10 @@ onUnmounted(() => {
   if (zoomRafId) cancelAnimationFrame(zoomRafId);
   clearTimeout(regionUpdateTimer);
   stopSmartFollow(); // 清理智能跟随RAF循环
+  
+  // 【关键】注销 WaveSurfer
+  playbackManager.unregisterWaveSurfer();
+  
   if (wavesurfer) {
     wavesurfer.destroy();
     wavesurfer = null;
