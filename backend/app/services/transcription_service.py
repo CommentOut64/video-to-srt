@@ -1013,7 +1013,8 @@ class TranscriptionService:
         job_dir: Path,
         job: JobState,
         segments: List[Dict],
-        processing_mode: ProcessingMode
+        processing_mode: ProcessingMode,
+        demucs_state: Dict = None
     ):
         """
         分段完成后强制刷新checkpoint（确保断点续传一致性）
@@ -1026,6 +1027,7 @@ class TranscriptionService:
             job: 任务状态对象
             segments: 分段元数据列表
             processing_mode: 当前处理模式
+            demucs_state: Demucs状态数据（可选）
         """
         import time
 
@@ -1039,6 +1041,10 @@ class TranscriptionService:
             "unaligned_results": [],
             "timestamp": time.time()  # 时间戳用于调试
         }
+
+        # 添加 demucs 状态（如果提供）
+        if demucs_state:
+            checkpoint_data["demucs"] = demucs_state
 
         # 强制同步写入（确保数据落盘）
         self._save_checkpoint(job_dir, checkpoint_data, job)
@@ -1142,7 +1148,63 @@ class TranscriptionService:
                 raise RuntimeError('任务已取消')
 
             # ==========================================
-            # 3. 阶段1.5: 智能模式决策（新增）
+            # 2. 阶段2: BGM检测（可选）
+            # ==========================================
+            from services.demucs_service import BGMLevel
+
+            bgm_level = BGMLevel.NONE
+            bgm_ratios = []
+            demucs_settings = job.settings.demucs
+
+            # 从checkpoint恢复BGM检测结果
+            if checkpoint and 'demucs' in checkpoint:
+                demucs_state = checkpoint['demucs']
+                bgm_level_str = demucs_state.get('bgm_level', 'none')
+                bgm_level = BGMLevel(bgm_level_str)
+                bgm_ratios = demucs_state.get('bgm_ratios', [])
+                self.logger.info(f"从检查点恢复BGM检测结果: {bgm_level.value}")
+            else:
+                # 执行BGM检测（如果启用且模式需要）
+                if demucs_settings.enabled and demucs_settings.mode in ["auto", "always"]:
+                    bgm_level, bgm_ratios = self._detect_bgm(str(audio_path), job)
+                    self.logger.info(f"BGM检测完成: {bgm_level.value}")
+
+            # ==========================================
+            # 3. 阶段3: 全局人声分离（条件执行）
+            # ==========================================
+            use_vocals = False
+            vocals_path = None
+
+            # 决策：何时执行全局分离
+            should_separate_global = (
+                demucs_settings.enabled and (
+                    demucs_settings.mode == "always" or
+                    (demucs_settings.mode == "auto" and bgm_level == BGMLevel.HEAVY)
+                )
+            )
+
+            # 从checkpoint恢复分离状态
+            if checkpoint and 'demucs' in checkpoint:
+                demucs_state = checkpoint['demucs']
+                if demucs_state.get('global_separation_done'):
+                    vocals_path = demucs_state.get('vocals_path')
+                    use_vocals = True
+                    self.logger.info(f"从检查点恢复：使用已分离的人声 {vocals_path}")
+
+            # 如果需要分离且尚未完成
+            if should_separate_global and not use_vocals:
+                vocals_path = self._separate_vocals_global(str(audio_path), job)
+                use_vocals = True
+                self.logger.info(f"全局人声分离完成: {vocals_path}")
+
+            # 决定后续使用哪个音频文件
+            active_audio_path = Path(vocals_path) if use_vocals else audio_path
+
+            if job.canceled:
+                raise RuntimeError('任务已取消')
+
+            # ==========================================
+            # 4. 阶段1.5: 智能模式决策
             # ==========================================
             processing_mode = None
             audio_array = None  # 内存模式下的音频数组
@@ -1155,16 +1217,16 @@ class TranscriptionService:
 
             # 如果没有检查点或没有模式信息，进行智能决策
             if processing_mode is None:
-                processing_mode = self._decide_processing_mode(str(audio_path), job)
+                processing_mode = self._decide_processing_mode(str(active_audio_path), job)
                 self.logger.info(f"智能选择处理模式: {processing_mode.value}")
 
             # ==========================================
-            # 4. 阶段1.6: 音频加载（内存模式）
+            # 5. 阶段1.6: 音频加载（内存模式）
             # ==========================================
             if processing_mode == ProcessingMode.MEMORY:
-                # 内存模式：尝试加载完整音频到内存
+                # 内存模式：尝试加载完整音频到内存（使用可能分离后的音频）
                 try:
-                    audio_array = self._safe_load_audio(str(audio_path), job)
+                    audio_array = self._safe_load_audio(str(active_audio_path), job)
                     self.logger.info("音频已加载到内存（内存模式）")
                 except RuntimeError as e:
                     # 加载失败，降级到硬盘模式
@@ -1173,7 +1235,7 @@ class TranscriptionService:
                     audio_array = None
 
             # ==========================================
-            # 5. 阶段2: 智能分段（模式感知）
+            # 6. 阶段2: 智能分段（模式感知）
             # ==========================================
             # 如果检查点里没有分段信息，说明上次没跑到分段完成
             if not current_segments:
@@ -1190,9 +1252,9 @@ class TranscriptionService:
                         vad_config=VADConfig()  # 使用默认Silero VAD
                     )
                 else:
-                    # 硬盘模式：传统pydub分段
+                    # 硬盘模式：传统pydub分段（使用可能分离后的音频）
                     self.logger.info("使用硬盘分段（稳定模式）")
-                    current_segments = self._split_audio_to_disk(str(audio_path))
+                    current_segments = self._split_audio_to_disk(str(active_audio_path))
 
                 if job.canceled:
                     raise RuntimeError('任务已取消')
@@ -1201,14 +1263,24 @@ class TranscriptionService:
                 job.total = len(current_segments)
                 self._update_progress(job, 'split', 1, f'分段完成 共{job.total}段')
 
-                # 【关键埋点1】分段完成后强制刷新checkpoint（使用新方法）
+                # 【关键埋点1】分段完成后强制刷新checkpoint（使用新方法，包含demucs状态）
                 self._flush_checkpoint_after_split(
                     job_dir,
                     job,
                     current_segments,
-                    processing_mode
+                    processing_mode,
+                    demucs_state={
+                        "enabled": demucs_settings.enabled,
+                        "mode": demucs_settings.mode,
+                        "bgm_level": bgm_level.value,
+                        "bgm_ratios": bgm_ratios,
+                        "global_separation_done": use_vocals,
+                        "vocals_path": str(vocals_path) if vocals_path else None,
+                        "circuit_breaker": None,
+                        "retry_triggered": False
+                    }
                 )
-                self.logger.info("检查点已强制刷新: 分段完成")
+                self.logger.info("检查点已强制刷新: 分段完成（含demucs状态）")
             else:
                 self.logger.info(f"跳过分段，使用检查点数据（共{len(current_segments)}段）")
                 job.segments = current_segments  # 恢复到 job 对象
@@ -1847,6 +1919,137 @@ class TranscriptionService:
 
         self.logger.info(f"能量检测分段完成: {len(segments_metadata)}段")
         return segments_metadata
+
+    # ==========================================
+    # Demucs 人声分离相关方法
+    # ==========================================
+
+    def _detect_bgm(self, audio_path: str, job: JobState):
+        """
+        执行BGM检测，更新进度
+
+        Args:
+            audio_path: 音频文件路径
+            job: 任务状态对象
+
+        Returns:
+            Tuple[BGMLevel, List[float]]: (BGM强度级别, 各采样点的BGM比例列表)
+        """
+        from services.demucs_service import get_demucs_service, BGMLevel
+
+        self._update_progress(job, 'bgm_detect', 0, 'BGM检测中...')
+
+        try:
+            demucs = get_demucs_service()
+
+            # 执行BGM检测
+            level, ratios = demucs.detect_background_music_level(audio_path)
+
+            self._update_progress(job, 'bgm_detect', 1, f'BGM检测完成: {level.value}')
+
+            # 推送SSE事件
+            self._push_sse_bgm_detected(job, level, ratios)
+
+            self.logger.info(
+                f"BGM检测结果: {level.value}, "
+                f"比例={ratios}, 最大={max(ratios) if ratios else 0:.2f}"
+            )
+
+            return level, ratios
+
+        except Exception as e:
+            self.logger.warning(f"BGM检测失败，将跳过Demucs: {e}")
+            # 失败时返回 NONE 级别，不影响主流程
+            from services.demucs_service import BGMLevel
+            return BGMLevel.NONE, []
+
+    def _separate_vocals_global(self, audio_path: str, job: JobState) -> str:
+        """
+        执行全局人声分离，更新进度
+
+        Args:
+            audio_path: 原始音频路径
+            job: 任务状态对象
+
+        Returns:
+            str: 分离后的人声文件路径
+        """
+        from services.demucs_service import get_demucs_service
+
+        self._update_progress(job, 'demucs_global', 0, '人声分离中...')
+
+        try:
+            demucs = get_demucs_service()
+
+            def progress_callback(progress: float, message: str):
+                """进度回调"""
+                self._update_progress(job, 'demucs_global', progress, message)
+
+            # 执行人声分离
+            vocals_path = demucs.separate_vocals(
+                audio_path,
+                progress_callback=progress_callback
+            )
+
+            self._update_progress(job, 'demucs_global', 1, '人声分离完成')
+            self.logger.info(f"全局人声分离完成: {vocals_path}")
+
+            return vocals_path
+
+        except Exception as e:
+            self.logger.error(f"人声分离失败: {e}")
+            # 分离失败时返回原始音频路径（降级处理）
+            self.logger.warning("人声分离失败，将使用原始音频继续处理")
+            return audio_path
+
+    def _push_sse_bgm_detected(self, job: JobState, level, ratios):
+        """
+        推送BGM检测结果事件
+
+        Args:
+            job: 任务状态对象
+            level: BGM强度级别
+            ratios: 各采样点的BGM比例列表
+        """
+        try:
+            from services.sse_service import get_sse_manager
+
+            sse_manager = get_sse_manager()
+            channel_id = f"job:{job.job_id}"
+
+            # 构造事件数据
+            event_data = {
+                "level": level.value,
+                "ratios": ratios,
+                "max_ratio": max(ratios) if ratios else 0,
+                "recommendation": self._get_demucs_recommendation(level)
+            }
+
+            # 广播事件
+            sse_manager.broadcast_sync(channel_id, "bgm_detected", event_data)
+
+        except Exception as e:
+            # SSE推送失败不应影响主流程
+            self.logger.debug(f"SSE推送失败（非致命）: {e}")
+
+    def _get_demucs_recommendation(self, level) -> str:
+        """
+        根据BGM级别返回建议的处理模式
+
+        Args:
+            level: BGM强度级别
+
+        Returns:
+            str: 建议的处理模式描述
+        """
+        from services.demucs_service import BGMLevel
+
+        if level == BGMLevel.HEAVY:
+            return "全局分离"
+        elif level == BGMLevel.LIGHT:
+            return "按需分离"
+        else:
+            return "无需分离"
 
     def _extract_audio(self, input_file: str, audio_out: str) -> bool:
         """
