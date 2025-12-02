@@ -39,17 +39,27 @@ class VADConfig:
     """
     VAD配置数据类
     用于配置语音活动检测的参数
+    
+    参数说明：
+    - onset (0.0-1.0)：语音开始阈值，越高越严格，推荐0.6-0.7以过滤背景音乐
+    - offset (0.0-1.0)：语音结束阈值，通常为onset的70%左右
+    - min_speech_duration_ms：最小语音段长度，避免误检碎片音（推荐300-500ms）
+    - min_silence_duration_ms：最小静音长度，越长越能过滤背景音乐（推荐300-500ms）
     """
     method: VADMethod = VADMethod.SILERO  # 默认使用Silero
     hf_token: Optional[str] = None         # Pyannote需要的HF Token
-    onset: float = 0.5                     # 语音开始阈值
-    offset: float = 0.363                  # 语音结束阈值
+    onset: float = 0.65                    # 语音开始阈值（提升至0.65以过滤背景音乐）
+    offset: float = 0.45                   # 语音结束阈值（对应onset=0.65的调整）
     chunk_size: int = 30                   # 最大段长（秒）
+    min_speech_duration_ms: int = 400      # 最小语音段长度（毫秒，默认400ms）
+    min_silence_duration_ms: int = 400     # 最小静音长度（毫秒，默认400ms）
 
     def validate(self) -> bool:
         """验证配置有效性"""
         if self.method == VADMethod.PYANNOTE and not self.hf_token:
             return False  # Pyannote需要Token
+        if not (0.0 <= self.onset <= 1.0) or not (0.0 <= self.offset <= 1.0):
+            return False  # 阈值必须在0-1之间
         return True
 
 from models.job_models import JobSettings, JobState
@@ -1606,9 +1616,9 @@ class TranscriptionService:
             audio_tensor,
             model,
             sampling_rate=sr,
-            threshold=vad_config.onset,      # 检测阈值
-            min_speech_duration_ms=250,       # 最小语音段长度
-            min_silence_duration_ms=100,      # 最小静音长度
+            threshold=vad_config.onset,                    # 检测阈值（从config读取，默认0.65）
+            min_speech_duration_ms=vad_config.min_speech_duration_ms,   # 最小语音段长度（默认400ms）
+            min_silence_duration_ms=vad_config.min_silence_duration_ms, # 最小静音长度（默认400ms）
             return_seconds=False  # 返回采样点而非秒数
         )
 
