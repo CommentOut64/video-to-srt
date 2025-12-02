@@ -162,6 +162,15 @@ const isDraggingScrollbar = ref(false);
 let scrollbarDragStartX = 0;
 let scrollbarDragStartScroll = 0;
 
+// RAF节流状态
+let scrollbarRafId = null;
+let pendingScrollEvent = null;
+
+// DOM查询缓存
+let cachedScrollWidth = 0;
+let cachedClientWidth = 0;
+let cachedMaxScrollLeft = 0;
+
 // Wavesurfer实例
 let wavesurfer = null;
 let regionsPlugin = null;
@@ -813,7 +822,7 @@ function handleWaveformMouseLeave() {
 // ============ 自定义滚动条逻辑 ============
 
 /**
- * 更新滚动条位置和宽度
+ * 更新滚动条位置和宽度（优化版：避免不必要的响应式更新）
  */
 function updateScrollbarThumb() {
   if (!wavesurfer || !isReady.value) return;
@@ -828,23 +837,28 @@ function updateScrollbarThumb() {
   const clientWidth = scrollContainer.clientWidth;
   const scrollLeft = scrollContainer.scrollLeft;
 
-  // 计算滚动条thumb的宽度（百分比）
-  const thumbWidthPercent = (clientWidth / scrollWidth) * 100;
-  scrollbarThumbWidth.value = Math.max(5, Math.min(100, thumbWidthPercent)); // 最小5%，最大100%
+  // 计算新的宽度和位置
+  const newThumbWidthPercent = Math.max(5, Math.min(100, (clientWidth / scrollWidth) * 100));
 
-  // 计算滚动条thumb的位置（百分比）
   const maxScrollLeft = scrollWidth - clientWidth;
+  let newThumbLeftPercent = 0;
   if (maxScrollLeft > 0) {
-    const thumbLeftPercent =
-      (scrollLeft / maxScrollLeft) * (100 - thumbWidthPercent);
-    scrollbarThumbLeft.value = thumbLeftPercent;
-  } else {
-    scrollbarThumbLeft.value = 0;
+    newThumbLeftPercent = (scrollLeft / maxScrollLeft) * (100 - newThumbWidthPercent);
+  }
+
+  // 只在值真正变化时才更新（减少响应式触发）
+  // 使用 0.1% 的阈值避免浮点数精度问题
+  if (Math.abs(scrollbarThumbWidth.value - newThumbWidthPercent) > 0.1) {
+    scrollbarThumbWidth.value = newThumbWidthPercent;
+  }
+
+  if (Math.abs(scrollbarThumbLeft.value - newThumbLeftPercent) > 0.1) {
+    scrollbarThumbLeft.value = newThumbLeftPercent;
   }
 }
 
 /**
- * 滚动条鼠标按下事件
+ * 滚动条鼠标按下事件（优化版：缓存DOM查询）
  */
 function handleScrollbarMouseDown(e) {
   if (!wavesurfer || !isReady.value) return;
@@ -857,6 +871,11 @@ function handleScrollbarMouseDown(e) {
 
   e.preventDefault();
 
+  // 缓存容器尺寸，避免拖拽过程中重复查询
+  cachedScrollWidth = wrapper.scrollWidth;
+  cachedClientWidth = scrollContainer.clientWidth;
+  cachedMaxScrollLeft = cachedScrollWidth - cachedClientWidth;
+
   const rect = scrollbarTrackRef.value.getBoundingClientRect();
   const clickX = e.clientX - rect.left;
   const trackWidth = rect.width;
@@ -865,11 +884,7 @@ function handleScrollbarMouseDown(e) {
   const clickPercent = clickX / trackWidth;
 
   // 计算应该滚动到的位置
-  const scrollWidth = wrapper.scrollWidth;
-  const clientWidth = scrollContainer.clientWidth;
-  const maxScrollLeft = scrollWidth - clientWidth;
-
-  const targetScrollLeft = clickPercent * maxScrollLeft;
+  const targetScrollLeft = clickPercent * cachedMaxScrollLeft;
   scrollContainer.scrollLeft = targetScrollLeft;
 
   // 更新滚动条显示
@@ -892,34 +907,61 @@ function handleScrollbarMouseDown(e) {
 }
 
 /**
- * 滚动条拖拽移动
+ * 滚动条拖拽移动（优化版：使用RAF节流）
  */
 function handleScrollbarDragMove(e) {
   if (!isDraggingScrollbar.value || !wavesurfer) return;
 
+  // 只保存最新的事件信息，不立即计算
+  pendingScrollEvent = {
+    clientX: e.clientX,
+    timestamp: Date.now()
+  };
+
+  // 使用RAF在下一帧渲染前统一处理
+  if (!scrollbarRafId) {
+    scrollbarRafId = requestAnimationFrame(processScrollbarDrag);
+  }
+}
+
+/**
+ * 处理滚动条拖拽（在RAF中执行）
+ */
+function processScrollbarDrag() {
+  if (!pendingScrollEvent || !isDraggingScrollbar.value || !wavesurfer) {
+    scrollbarRafId = null;
+    return;
+  }
+
   const wrapper = wavesurfer.getWrapper();
-  if (!wrapper) return;
+  if (!wrapper) {
+    scrollbarRafId = null;
+    return;
+  }
 
   const scrollContainer = wrapper.parentElement;
-  if (!scrollContainer) return;
+  if (!scrollContainer) {
+    scrollbarRafId = null;
+    return;
+  }
 
+  // 计算新的滚动位置（使用缓存的尺寸数据）
   const rect = scrollbarTrackRef.value.getBoundingClientRect();
   const trackWidth = rect.width;
-
-  const deltaX = e.clientX - rect.left - scrollbarDragStartX;
+  const deltaX = pendingScrollEvent.clientX - rect.left - scrollbarDragStartX;
   const deltaPercent = deltaX / trackWidth;
 
-  const scrollWidth = wrapper.scrollWidth;
-  const clientWidth = scrollContainer.clientWidth;
-  const maxScrollLeft = scrollWidth - clientWidth;
+  const newScrollLeft = scrollbarDragStartScroll + deltaPercent * cachedMaxScrollLeft;
 
-  const newScrollLeft = scrollbarDragStartScroll + deltaPercent * maxScrollLeft;
-  scrollContainer.scrollLeft = Math.max(
-    0,
-    Math.min(newScrollLeft, maxScrollLeft)
-  );
+  // 更新滚动位置
+  scrollContainer.scrollLeft = Math.max(0, Math.min(newScrollLeft, cachedMaxScrollLeft));
 
+  // 批量更新响应式变量
   updateScrollbarThumb();
+
+  // 清空状态
+  pendingScrollEvent = null;
+  scrollbarRafId = null;
 }
 
 /**
@@ -927,8 +969,20 @@ function handleScrollbarDragMove(e) {
  */
 function handleScrollbarDragEnd() {
   isDraggingScrollbar.value = false;
+
+  // 清理RAF
+  if (scrollbarRafId) {
+    cancelAnimationFrame(scrollbarRafId);
+    scrollbarRafId = null;
+  }
+
   document.removeEventListener("mousemove", handleScrollbarDragMove);
   document.removeEventListener("mouseup", handleScrollbarDragEnd);
+
+  // 确保最终状态同步
+  nextTick(() => {
+    updateScrollbarThumb();
+  });
 }
 
 // 格式化时间
@@ -1107,10 +1161,16 @@ onMounted(async () => {
 
 onUnmounted(() => {
   containerRef.value?.removeEventListener("wheel", handleWheel);
+
+  // 清理缩放RAF
   if (zoomRafId) cancelAnimationFrame(zoomRafId);
+
+  // 清理滚动条拖拽RAF
+  if (scrollbarRafId) cancelAnimationFrame(scrollbarRafId);
+
   clearTimeout(regionUpdateTimer);
   stopSmartFollow(); // 清理智能跟随RAF循环
-  
+
   // 【关键】注销 WaveSurfer
   playbackManager.unregisterWaveSurfer();
   
