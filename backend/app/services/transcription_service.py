@@ -39,17 +39,27 @@ class VADConfig:
     """
     VAD配置数据类
     用于配置语音活动检测的参数
+    
+    参数说明：
+    - onset (0.0-1.0)：语音开始阈值，越高越严格，推荐0.6-0.7以过滤背景音乐
+    - offset (0.0-1.0)：语音结束阈值，通常为onset的70%左右
+    - min_speech_duration_ms：最小语音段长度，避免误检碎片音（推荐300-500ms）
+    - min_silence_duration_ms：最小静音长度，越长越能过滤背景音乐（推荐300-500ms）
     """
     method: VADMethod = VADMethod.SILERO  # 默认使用Silero
     hf_token: Optional[str] = None         # Pyannote需要的HF Token
-    onset: float = 0.5                     # 语音开始阈值
-    offset: float = 0.363                  # 语音结束阈值
+    onset: float = 0.65                    # 语音开始阈值（提升至0.65以过滤背景音乐）
+    offset: float = 0.45                   # 语音结束阈值（对应onset=0.65的调整）
     chunk_size: int = 30                   # 最大段长（秒）
+    min_speech_duration_ms: int = 400      # 最小语音段长度（毫秒，默认400ms）
+    min_silence_duration_ms: int = 400     # 最小静音长度（毫秒，默认400ms）
 
     def validate(self) -> bool:
         """验证配置有效性"""
         if self.method == VADMethod.PYANNOTE and not self.hf_token:
             return False  # Pyannote需要Token
+        if not (0.0 <= self.onset <= 1.0) or not (0.0 <= self.offset <= 1.0):
+            return False  # 阈值必须在0-1之间
         return True
 
 from models.job_models import JobSettings, JobState
@@ -246,8 +256,73 @@ class TranscriptionService:
         # 添加文件路径到任务ID的映射
         self.job_index.add_mapping(src_path, job_id)
 
+        # 持久化任务元信息（重启后可恢复）
+        self.save_job_meta(job)
+
         self.logger.info(f"任务已创建: {job_id} - {filename}")
         return job
+
+    def save_job_meta(self, job: JobState) -> bool:
+        """
+        保存任务元信息到 job_meta.json（用于重启后恢复）
+
+        使用原子写入确保断电安全：先写临时文件，再rename替换
+
+        Args:
+            job: 任务状态对象
+
+        Returns:
+            bool: 是否成功保存
+        """
+        job_dir = Path(job.dir)
+        meta_file = job_dir / "job_meta.json"
+
+        try:
+            job_dir.mkdir(parents=True, exist_ok=True)
+
+            # 原子写入：先写临时文件，再rename替换
+            temp_file = meta_file.with_suffix(".tmp")
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(job.to_meta_dict(), f, indent=2, ensure_ascii=False)
+
+            # 原子替换
+            temp_file.replace(meta_file)
+            self.logger.debug(f"任务元信息已保存: {job.job_id}")
+            return True
+        except Exception as e:
+            self.logger.error(f"保存任务元信息失败 {job.job_id}: {e}")
+            return False
+
+    def load_job_meta(self, job_id: str) -> Optional[JobState]:
+        """
+        从 job_meta.json 加载任务元信息
+
+        Args:
+            job_id: 任务ID
+
+        Returns:
+            Optional[JobState]: 恢复的任务状态对象
+        """
+        job_dir = self.jobs_root / job_id
+        meta_file = job_dir / "job_meta.json"
+
+        if not meta_file.exists():
+            return None
+
+        try:
+            with open(meta_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            job = JobState.from_meta_dict(data)
+
+            # 确保 dir 路径正确（可能因为项目迁移而改变）
+            job.dir = str(job_dir)
+
+            self.logger.debug(f"从 job_meta.json 加载任务: {job_id}")
+            return job
+        except Exception as e:
+            self.logger.error(f"加载任务元信息失败 {job_id}: {e}")
+            return None
 
     def get_job(self, job_id: str) -> Optional[JobState]:
         """
@@ -270,6 +345,16 @@ class TranscriptionService:
             return None
 
         try:
+            # 优先从 job_meta.json 加载（包含完整的任务状态）
+            job = self.load_job_meta(job_id)
+            if job:
+                # 缓存到内存
+                with self.lock:
+                    self.jobs[job_id] = job
+                self.logger.info(f"从 job_meta.json 恢复任务: {job_id}")
+                return job
+
+            # 降级：从目录文件推断状态（兼容旧版本）
             # 尝试找到原始文件
             filename = "未知文件"
             input_path = None
@@ -321,7 +406,10 @@ class TranscriptionService:
             with self.lock:
                 self.jobs[job_id] = job
 
-            self.logger.info(f"从磁盘恢复任务: {job_id}")
+            # 同时保存 job_meta.json 以便下次直接加载
+            self.save_job_meta(job)
+
+            self.logger.info(f"从磁盘恢复任务（旧版兼容）: {job_id}")
             return job
 
         except Exception as e:
@@ -391,7 +479,7 @@ class TranscriptionService:
 
     def restore_job_from_checkpoint(self, job_id: str) -> Optional[JobState]:
         """
-        从检查点恢复任务状态
+        从检查点恢复任务状态（无 checkpoint 时从头开始）
 
         Args:
             job_id: 任务ID
@@ -403,9 +491,8 @@ class TranscriptionService:
         if not job_dir.exists():
             return None
 
+        # 尝试加载 checkpoint（可能不存在）
         checkpoint = self._load_checkpoint(job_dir)
-        if not checkpoint:
-            return None
 
         try:
             # 查找原文件
@@ -433,25 +520,43 @@ class TranscriptionService:
                 exclude_cores=None
             )
 
+            # 根据是否有 checkpoint 决定恢复状态
+            if checkpoint:
+                # 有 checkpoint，从断点恢复
+                phase = checkpoint.get('phase', 'pending')
+                total_segments = checkpoint.get('total_segments', 0)
+                processed_indices = checkpoint.get('processed_indices', [])
+                processed = len(processed_indices)
+                progress = round((processed / max(1, total_segments)) * 100, 2)
+                message = f"已暂停 ({processed}/{total_segments}段)"
+                self.logger.info(f"从检查点恢复任务: {job_id}")
+            else:
+                # 无 checkpoint，从头开始
+                phase = 'pending'
+                total_segments = 0
+                processed = 0
+                progress = 0
+                message = "程序重启，任务将从头开始"
+                self.logger.info(f"无检查点，任务将从头开始: {job_id}")
+
             # 创建任务状态对象
             job = JobState(
                 job_id=job_id,
                 filename=filename,
                 dir=str(job_dir),
                 input_path=input_path,
-                settings=JobSettings(cpu_affinity=default_cpu_config),  # 提供默认的cpu_affinity
+                settings=JobSettings(cpu_affinity=default_cpu_config),
                 status="paused",
-                phase=checkpoint.get('phase', 'pending'),
-                message=f"已暂停 ({len(checkpoint.get('processed_indices', []))}/{checkpoint.get('total_segments', 0)}段)",
-                total=checkpoint.get('total_segments', 0),
-                processed=len(checkpoint.get('processed_indices', [])),
-                progress=round((len(checkpoint.get('processed_indices', [])) / max(1, checkpoint.get('total_segments', 1))) * 100, 2)
+                phase=phase,
+                message=message,
+                total=total_segments,
+                processed=processed,
+                progress=progress
             )
 
             with self.lock:
                 self.jobs[job_id] = job
 
-            self.logger.info(f"从检查点恢复任务: {job_id}")
             return job
 
         except Exception as e:
@@ -610,6 +715,9 @@ class TranscriptionService:
         """
         job.phase = phase
 
+        # 计算阶段内进度（0-100，保留1位小数）
+        job.phase_percent = round(max(0.0, min(1.0, phase_ratio)) * 100, 1)
+
         # 使用配置中的进度权重
         phase_weights = config.PHASE_WEIGHTS
         total_weight = config.TOTAL_WEIGHT
@@ -622,7 +730,8 @@ class TranscriptionService:
             done_weight += w
 
         current_weight = phase_weights.get(phase, 0) * max(0.0, min(1.0, phase_ratio))
-        job.progress = round((done_weight + current_weight) / total_weight * 100, 2)
+        # 改为1位小数
+        job.progress = round((done_weight + current_weight) / total_weight * 100, 1)
 
         if message:
             job.message = message
@@ -633,6 +742,7 @@ class TranscriptionService:
     def _push_sse_progress(self, job: JobState):
         """
         推送SSE进度更新（线程安全）
+        同时推送到单任务频道和全局频道，确保 TaskMonitor 实时更新
 
         Args:
             job: 任务状态对象
@@ -642,22 +752,34 @@ class TranscriptionService:
             from services.sse_service import get_sse_manager
             sse_manager = get_sse_manager()
 
+            # 1. 推送到单任务频道（EditorView 使用）
             channel_id = f"job:{job.job_id}"
+            progress_data = {
+                "job_id": job.job_id,
+                "phase": job.phase,
+                "percent": job.progress,
+                "phase_percent": job.phase_percent,  # 新增：阶段内进度
+                "message": job.message,
+                "status": job.status,
+                "processed": job.processed,
+                "total": job.total,
+                "language": job.language or ""
+            }
+            sse_manager.broadcast_sync(channel_id, "progress", progress_data)
 
-            sse_manager.broadcast_sync(
-                channel_id,
-                "progress",
-                {
-                    "job_id": job.job_id,
-                    "phase": job.phase,
-                    "percent": job.progress,
-                    "message": job.message,
-                    "status": job.status,
-                    "processed": job.processed,
-                    "total": job.total,
-                    "language": job.language or ""
-                }
-            )
+            # 2. 推送到全局频道（TaskMonitor 使用）
+            global_progress_data = {
+                "id": job.job_id,  # 全局频道使用 "id"
+                "percent": job.progress,
+                "phase_percent": job.phase_percent,  # 新增：阶段内进度
+                "message": job.message,
+                "status": job.status,
+                "phase": job.phase,
+                "processed": job.processed,
+                "total": job.total
+            }
+            sse_manager.broadcast_sync("global", "job_progress", global_progress_data)
+
         except Exception as e:
             # SSE推送失败不应影响转录流程
             self.logger.debug(f"SSE推送失败: {e}")
@@ -682,10 +804,10 @@ class TranscriptionService:
                 "signal",
                 {
                     "job_id": job.job_id,
-                    "code": signal_code,
+                    "signal": signal_code,  # 统一使用 "signal" 字段
                     "message": message or job.message,
                     "status": job.status,
-                    "progress": job.progress
+                    "percent": job.progress
                 }
             )
         except Exception as e:
@@ -839,6 +961,10 @@ class TranscriptionService:
             # 2. 原子替换（Windows/Linux/macOS 均支持）
             # 如果程序在这里崩溃，checkpoint.json 依然是旧版本，不会损坏
             os.replace(temp_path, checkpoint_path)
+
+            # 3. 同步保存任务元信息（用于重启后恢复任务状态）
+            # 这样每次保存检查点时，任务的进度和状态都会被持久化
+            self.save_job_meta(job)
 
         except Exception as e:
             self.logger.error(f"保存检查点失败: {e}")
@@ -1490,9 +1616,9 @@ class TranscriptionService:
             audio_tensor,
             model,
             sampling_rate=sr,
-            threshold=vad_config.onset,      # 检测阈值
-            min_speech_duration_ms=250,       # 最小语音段长度
-            min_silence_duration_ms=100,      # 最小静音长度
+            threshold=vad_config.onset,                    # 检测阈值（从config读取，默认0.65）
+            min_speech_duration_ms=vad_config.min_speech_duration_ms,   # 最小语音段长度（默认400ms）
+            min_silence_duration_ms=vad_config.min_silence_duration_ms, # 最小静音长度（默认400ms）
             return_seconds=False  # 返回采样点而非秒数
         )
 

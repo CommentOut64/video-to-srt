@@ -81,6 +81,7 @@ ENV/
 *.srt
 *.csv
 output/
+llmdoc/
 
 # 测试文件
 test_*

@@ -79,12 +79,17 @@ class ProjectConfig:
         self.SILENCE_THRESHOLD_DBFS = -40    # -40dB
 
         # ========== 进度权重配置 ==========
+        # 核心流程权重（转录+对齐 = 100%）
         self.PHASE_WEIGHTS = {
+            "pending": 0,      # 等待开始
             "extract": 5,      # 音频提取占5%
             "split": 5,        # 音频分段占5%
             "transcribe": 60,  # 转录处理占60%（降低，因对齐权重增加）
             "align": 20,       # 对齐处理占20%（增加，因为是批次对齐）
-            "srt": 10          # SRT生成占10%
+            "translate": 0,    # 翻译（预留，当前不启用）
+            "proofread": 0,    # 校对（预留，当前不启用）
+            "srt": 10,         # SRT生成占10%
+            "complete": 0      # 完成
         }
         self.TOTAL_WEIGHT = sum(self.PHASE_WEIGHTS.values())  # 计算总和，保证为100
 
@@ -116,6 +121,15 @@ class ProjectConfig:
         self.SSE_MAX_QUEUE_SIZE = 1000     # 每个连接的消息队列大小
         self.SSE_MAX_CONNECTIONS_PER_CHANNEL = 10  # 每个频道最大连接数
 
+        # ========== 渐进式加载配置 ==========
+        self.ENABLE_PROGRESSIVE_LOADING = True   # 是否启用渐进式加载
+        self.PREVIEW_RESOLUTION = 360            # 预览视频分辨率（高度）
+        self.PROXY_RESOLUTION = 720              # 高质量代理视频分辨率
+        self.PREVIEW_QUALITY = 28                # 预览视频 CRF 质量（1-51，越低越好）
+        self.PROXY_QUALITY = 23                  # 高质量代理视频 CRF 质量
+        self.PREVIEW_PRESET = "ultrafast"        # 预览视频编码预设
+        self.PROXY_PRESET = "fast"               # 高质量视频编码预设
+
     def get_ffmpeg_command(self) -> str:
         """
         获取FFmpeg命令
@@ -130,6 +144,22 @@ class ProjectConfig:
         else:
             # 回退到系统命令
             return "ffmpeg"
+
+    def get_ffprobe_command(self) -> str:
+        """
+        获取FFprobe命令
+        优先使用项目内的FFprobe，支持独立打包
+
+        Returns:
+            str: FFprobe可执行文件路径
+        """
+        ffprobe_exe = self.FFMPEG_DIR / "ffprobe.exe"
+        if ffprobe_exe.exists():
+            # 使用项目内的FFprobe
+            return str(ffprobe_exe)
+        else:
+            # 回退到系统命令
+            return "ffprobe"
 
     def get_audio_config(self) -> dict:
         """获取音频处理配置"""

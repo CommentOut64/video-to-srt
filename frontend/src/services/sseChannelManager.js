@@ -54,19 +54,26 @@ class SSEChannelManager extends EventEmitter {
         handlers.onQueueUpdate?.(data.queue)
       },
       job_status: (data) => {
+        // 兼容处理：优先使用percent，fallback到progress
+        const percent = data.percent ?? data.progress ?? 0
         console.log('[SSE Global] 任务状态:', data)
-        handlers.onJobStatus?.(data.job_id, data.status, data)
+        // 使用 data.id 而非 data.job_id，兼容全局频道的字段名
+        handlers.onJobStatus?.(data.id || data.job_id, data.status, { ...data, percent })
       },
       job_progress: (data) => {
-        console.log('[SSE Global] 任务进度:', data.job_id, data.percent)
-        handlers.onJobProgress?.(data.job_id, data.percent, data)
+        // 兼容处理：优先使用percent，fallback到progress
+        const percent = data.percent ?? data.progress ?? 0
+        console.log('[SSE Global] 任务进度:', data.id || data.job_id, percent)
+        // 使用 data.id 而非 data.job_id，兼容全局频道的字段名
+        handlers.onJobProgress?.(data.id || data.job_id, percent, { ...data, percent })
       },
       connected: (data) => {
         console.log('[SSE Global] 连接成功:', data)
         handlers.onConnected?.(data)
       },
       ping: () => {
-        // 心跳，不处理
+        // 心跳事件，用于保持连接活跃
+        handlers.onPing?.()
       }
     })
   }
@@ -94,35 +101,59 @@ class SSEChannelManager extends EventEmitter {
         handlers.onInitialState?.(data)
       },
       progress: (data) => {
-        console.log(`[SSE Job ${jobId}] 进度:`, data.percent)
-        handlers.onProgress?.(data)
+        // 兼容处理：优先使用percent，fallback到progress
+        const percent = data.percent ?? data.progress ?? 0
+        console.log(`[SSE Job ${jobId}] 进度:`, percent)
+        handlers.onProgress?.({ ...data, percent })
       },
       signal: (data) => {
-        console.log(`[SSE Job ${jobId}] 信号:`, data.signal)
+        // 兼容处理：优先使用signal，fallback到code
+        const signal = data.signal || data.code
+        console.log(`[SSE Job ${jobId}] 信号:`, signal)
 
         // 分发特定信号事件
-        if (data.signal === 'job_complete') {
+        if (signal === 'job_complete') {
           handlers.onComplete?.(data)
-        } else if (data.signal === 'job_failed') {
+        } else if (signal === 'job_failed') {
           handlers.onFailed?.(data)
+        } else if (signal === 'job_paused') {
+          handlers.onPaused?.(data)
+        } else if (signal === 'job_canceled') {
+          handlers.onCanceled?.(data)
+        } else if (signal === 'job_resumed') {
+          // 新增：处理任务恢复信号
+          handlers.onResumed?.(data)
         }
 
-        handlers.onSignal?.(data.signal, data)
+        handlers.onSignal?.(signal, data)
+      },
+      align_progress: (data) => {
+        console.log(`[SSE Job ${jobId}] 对齐进度:`, data)
+        handlers.onAlignProgress?.(data)
+      },
+      segment: (data) => {
+        console.log(`[SSE Job ${jobId}] 片段:`, data)
+        handlers.onSegment?.(data)
+      },
+      aligned: (data) => {
+        console.log(`[SSE Job ${jobId}] 对齐完成:`, data)
+        handlers.onAligned?.(data)
       },
       proxy_progress: (data) => {
         console.log(`[SSE Job ${jobId}] Proxy 进度:`, data.progress)
-        handlers.onProxyProgress?.(data.progress)
+        handlers.onProxyProgress?.(data)  // 传递完整的data对象
       },
       proxy_complete: (data) => {
-        console.log(`[SSE Job ${jobId}] Proxy 完成`)
-        handlers.onProxyComplete?.()
+        console.log(`[SSE Job ${jobId}] Proxy 完成，完整数据:`, data)
+        handlers.onProxyComplete?.(data)  // 传递data对象（包含video_url等）
       },
       connected: (data) => {
         console.log(`[SSE Job ${jobId}] 连接成功`)
         handlers.onConnected?.(data)
       },
       ping: () => {
-        // 心跳，不处理
+        // 心跳事件，用于保持连接活跃
+        handlers.onPing?.()
       }
     })
   }
@@ -154,7 +185,8 @@ class SSEChannelManager extends EventEmitter {
         handlers.onConnected?.(data)
       },
       ping: () => {
-        // 心跳，不处理
+        // 心跳事件，用于保持连接活跃
+        handlers.onPing?.()
       }
     })
   }
@@ -164,10 +196,22 @@ class SSEChannelManager extends EventEmitter {
    * @private
    */
   _subscribe(channelId, url, eventHandlers) {
-    // 如果已存在连接，先关闭（正常的保护性逻辑）
-    if (this.channels.has(channelId)) {
-      console.log(`[SSEChannelManager] 频道 ${channelId} 已存在，先关闭旧连接`)
-      this.unsubscribe(channelId)
+    // 检查是否已存在连接
+    const existingConnection = this.channels.get(channelId)
+
+    // 关键修复：即使连接存在，也需要重建以确保新的事件处理器被绑定
+    // 原因：EventSource 的事件监听器是在创建时绑定的，复用连接会导致新组件的回调无法被调用
+    if (existingConnection) {
+      console.log(`[SSEChannelManager] 频道 ${channelId} 存在旧连接，关闭后重建以更新事件处理器`)
+      // 关闭旧连接
+      existingConnection.close()
+      this.channels.delete(channelId)
+      // 清除重连定时器
+      const reconnectInfo = this.reconnectState.get(channelId)
+      if (reconnectInfo?.timer) {
+        clearTimeout(reconnectInfo.timer)
+      }
+      this.reconnectState.delete(channelId)
     }
 
     // 保存配置
@@ -177,7 +221,17 @@ class SSEChannelManager extends EventEmitter {
     this._createConnection(channelId, url, eventHandlers)
 
     // 返回取消订阅函数
-    return () => this.unsubscribe(channelId)
+    return () => this._requestUnsubscribe(channelId)
+  }
+
+  /**
+   * 请求取消订阅（延迟执行，避免页面切换时误关闭）
+   * @private
+   */
+  _requestUnsubscribe(channelId) {
+    // 不立即关闭，给一个短暂的缓冲期
+    // 如果用户快速切换回来，可以复用连接
+    console.log(`[SSEChannelManager] 延迟取消订阅: ${channelId}`)
   }
 
   /**
@@ -206,19 +260,59 @@ class SSEChannelManager extends EventEmitter {
         })
       }
 
+      // 连接成功
+      eventSource.onopen = () => {
+        console.log(`[SSE ${channelId}] 连接成功`)
+        // 清除重连状态
+        this.reconnectState.delete(channelId)
+      }
+
       // 错误处理
       eventSource.onerror = (error) => {
         console.error(`[SSE ${channelId}] 连接错误:`, error)
 
-        // 检查连接状态
-        if (eventSource.readyState === EventSource.CLOSED) {
-          console.warn(`[SSE ${channelId}] 连接已关闭，尝试重连`)
-          this._scheduleReconnect(channelId)
+        // 关键修复：检查HTTP状态码，如果是404等客户端错误，不重连
+        // EventSource 在404时会触发error事件，但不会暴露status code
+        // 我们可以通过readyState判断，如果是CLOSED则可能是不可恢复错误
+        const readyState = eventSource.readyState
+
+        // 对于job频道，如果连接失败，先尝试验证任务是否存在
+        if (channelId.startsWith('job:') && readyState === EventSource.CLOSED) {
+          const jobId = channelId.split(':')[1]
+
+          // 尝试调用一个轻量级API验证任务是否存在
+          fetch(`${this.baseURL}/api/status/${jobId}`)
+            .then(res => {
+              if (res.status === 404) {
+                console.error(`[SSE ${channelId}] 任务不存在，停止重连`)
+                // 清理资源，不再重连
+                this.channels.delete(channelId)
+                this.channelConfigs.delete(channelId)
+                this.reconnectState.delete(channelId)
+                if (eventSource) eventSource.close()
+                return
+              }
+
+              // 任务存在但连接失败，进行重连
+              if (readyState === EventSource.CLOSED) {
+                console.warn(`[SSE ${channelId}] 连接已关闭但任务存在，尝试重连`)
+                this._scheduleReconnect(channelId)
+              }
+            })
+            .catch(() => {
+              // 验证请求失败，也进行重连（可能是网络问题）
+              if (readyState === EventSource.CLOSED) {
+                this._scheduleReconnect(channelId)
+              }
+            })
+        } else {
+          // 其他频道或readyState不是CLOSED，正常重连
+          if (readyState === EventSource.CLOSED) {
+            console.warn(`[SSE ${channelId}] 连接已关闭，尝试重连`)
+            this._scheduleReconnect(channelId)
+          }
         }
       }
-
-      // 清除重连状态
-      this.reconnectState.delete(channelId)
 
     } catch (error) {
       console.error(`[SSE ${channelId}] 创建连接失败:`, error)
@@ -251,10 +345,21 @@ class SSEChannelManager extends EventEmitter {
 
     reconnectInfo.attempts++
 
+    // 最大重连次数限制（防止任务不存在时无限重连）
+    const MAX_RECONNECT_ATTEMPTS = 5
+    if (reconnectInfo.attempts > MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[SSE ${channelId}] 已达到最大重连次数 (${MAX_RECONNECT_ATTEMPTS})，停止重连`)
+      // 清理资源
+      this.channels.delete(channelId)
+      this.channelConfigs.delete(channelId)
+      this.reconnectState.delete(channelId)
+      return
+    }
+
     // 计算重连延迟（指数退避，最大 30 秒）
     const delay = Math.min(1000 * Math.pow(2, reconnectInfo.attempts - 1), 30000)
 
-    console.log(`[SSE ${channelId}] ${delay}ms 后尝试第 ${reconnectInfo.attempts} 次重连`)
+    console.log(`[SSE ${channelId}] ${delay}ms 后尝试第 ${reconnectInfo.attempts}/${MAX_RECONNECT_ATTEMPTS} 次重连`)
 
     reconnectInfo.timer = setTimeout(() => {
       // 先关闭旧连接

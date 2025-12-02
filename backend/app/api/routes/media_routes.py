@@ -24,11 +24,14 @@ from core.config import config
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
-# 浏览器兼容的视频格式（H.264编码的MP4）
+# 浏览器兼容的视频格式（扩展名，但需进一步检查编码）
 BROWSER_COMPATIBLE_FORMATS = {'.mp4', '.webm'}
 
-# 需要转码的格式
+# 需要转码的格式（按扩展名）
 NEED_TRANSCODE_FORMATS = {'.mkv', '.avi', '.mov', '.wmv', '.flv', '.m4v'}
+
+# 浏览器不兼容的视频编码（需要转码为H.264）
+NEED_TRANSCODE_CODECS = {'hevc', 'h265', 'vp9', 'av1'}
 
 # Proxy生成状态追踪（job_id -> {progress, status, start_time}）
 _proxy_generation_status = {}
@@ -80,7 +83,15 @@ def _serve_file_with_range(file_path: Path, request: Request, media_type: str):
         with open(file_path, "rb") as f:
             f.seek(start)
             remaining = end - start + 1
-            chunk_size = 8192  # 8KB
+
+            # 动态 chunk_size：根据请求大小调整 (优化大视频拖动性能)
+            if remaining < 1024 * 1024:  # < 1MB
+                chunk_size = 8192  # 8KB
+            elif remaining < 10 * 1024 * 1024:  # < 10MB
+                chunk_size = 64 * 1024  # 64KB
+            else:
+                chunk_size = 256 * 1024  # 256KB
+
             while remaining > 0:
                 read_size = min(chunk_size, remaining)
                 data = f.read(read_size)
@@ -105,8 +116,7 @@ def _serve_file_with_range(file_path: Path, request: Request, media_type: str):
 
 async def _get_video_resolution(video_path: Path) -> tuple:
     """使用FFprobe获取视频分辨率"""
-    ffmpeg_cmd = config.get_ffmpeg_command()
-    ffprobe_cmd = ffmpeg_cmd.replace('ffmpeg', 'ffprobe')
+    ffprobe_cmd = config.get_ffprobe_command()
 
     cmd = [
         ffprobe_cmd, '-v', 'error',
@@ -134,10 +144,37 @@ async def _get_video_resolution(video_path: Path) -> tuple:
     return (0, 0)
 
 
+def _get_video_codec(video_path: Path) -> Optional[str]:
+    """
+    使用FFprobe获取视频编码格式
+    返回编码名称（如 h264, hevc, vp9 等），失败返回 None
+    """
+    ffprobe_cmd = config.get_ffprobe_command()
+
+    cmd = [
+        ffprobe_cmd, '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=codec_name',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        str(video_path)
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        if result.returncode == 0:
+            codec = result.stdout.strip().lower()
+            return codec if codec else None
+    except Exception as e:
+        print(f"[media] 获取视频编码失败: {e}")
+    return None
+
+
 async def _get_video_duration(video_path: Path) -> float:
     """使用FFprobe获取视频时长"""
-    ffmpeg_cmd = config.get_ffmpeg_command()
-    ffprobe_cmd = ffmpeg_cmd.replace('ffmpeg', 'ffprobe')
+    ffprobe_cmd = config.get_ffprobe_command()
 
     # 检查视频文件是否存在
     if not video_path.exists():
@@ -212,10 +249,12 @@ async def _generate_proxy_video_with_progress(source: Path, output: Path, job_id
             '-vf', 'scale=-2:720',
             '-c:v', 'libx264',
             '-preset', 'fast',
-            '-crf', '28',
+            '-crf', '23',               # 高质量 (优化拖动体验)
+            '-g', '30',                  # 关键帧间隔 (每秒1个,假设30fps,优化拖动)
             '-c:a', 'aac',
             '-b:a', '128k',
-            '-progress', 'pipe:1',  # 输出进度到stdout
+            '-movflags', '+faststart',   # moov atom 前置 (优化拖动响应)
+            '-progress', 'pipe:1',       # 输出进度到stdout
             '-y',
             str(output)
         ]
@@ -276,14 +315,22 @@ def _push_proxy_progress(job_id: str, progress: float, completed: bool = False):
         channel_id = f"job:{job_id}"
         event_type = "proxy_complete" if completed else "proxy_progress"
 
+        # 构建事件数据
+        data = {
+            "job_id": job_id,
+            "progress": progress,
+            "completed": completed
+        }
+
+        # 如果是完成事件，添加视频URL（关键修复！）
+        if completed:
+            data["video_url"] = f"/api/media/{job_id}/video"
+            print(f"[media] 推送Proxy完成事件，video_url: {data['video_url']}")
+
         sse_manager.broadcast_sync(
             channel_id,
             event_type,
-            {
-                "job_id": job_id,
-                "progress": progress,
-                "completed": completed
-            }
+            data
         )
     except Exception as e:
         # SSE推送失败不影响Proxy生成
@@ -296,7 +343,7 @@ def _generate_peaks_with_ffmpeg(audio_path: Path, samples: int = 2000) -> Tuple[
     适用于大文件（>100MB）
     """
     ffmpeg_cmd = config.get_ffmpeg_command()
-    ffprobe_cmd = ffmpeg_cmd.replace('ffmpeg', 'ffprobe')
+    ffprobe_cmd = config.get_ffprobe_command()
 
     # 获取音频时长
     probe_cmd = [
@@ -567,7 +614,7 @@ async def get_video(job_id: str, request: Request):
     获取视频文件（支持Range请求，自动Proxy转码）
 
     优先返回Proxy视频（如果存在），否则返回源视频
-    对于不兼容的格式，会触发异步生成Proxy
+    对于不兼容的格式或编码（如HEVC/H.265），会触发异步生成Proxy
     """
     job_dir = config.JOBS_DIR / job_id
 
@@ -584,8 +631,23 @@ async def get_video(job_id: str, request: Request):
     if not video_file:
         raise HTTPException(status_code=404, detail="视频文件不存在")
 
-    # 3. 检查是否需要生成Proxy
+    # 3. 检查是否需要生成Proxy（先检查扩展名，再检查编码）
+    needs_transcode = False
+    transcode_reason = ""
+
+    # 3.1 检查文件扩展名
     if video_file.suffix.lower() in NEED_TRANSCODE_FORMATS:
+        needs_transcode = True
+        transcode_reason = f"格式不兼容 ({video_file.suffix})"
+    # 3.2 即使是 .mp4/.webm，也需检查实际编码是否兼容
+    elif video_file.suffix.lower() in BROWSER_COMPATIBLE_FORMATS:
+        codec = _get_video_codec(video_file)
+        if codec and codec in NEED_TRANSCODE_CODECS:
+            needs_transcode = True
+            transcode_reason = f"编码不兼容 ({codec.upper()})"
+            print(f"[media] 检测到不兼容编码: {codec}，需要转码为H.264")
+
+    if needs_transcode:
         # 检查是否已在生成中
         if job_id in _proxy_generation_status and _proxy_generation_status[job_id]["status"] == "processing":
             raise HTTPException(
@@ -603,7 +665,7 @@ async def get_video(job_id: str, request: Request):
         raise HTTPException(
             status_code=202,
             detail={
-                "message": "视频格式不兼容，正在生成预览版本...",
+                "message": f"视频{transcode_reason}，正在生成预览版本...",
                 "format": video_file.suffix,
                 "proxy_generating": True
             }
@@ -626,13 +688,13 @@ async def get_audio(job_id: str, request: Request):
 
 
 @router.get("/{job_id}/peaks")
-async def get_audio_peaks(job_id: str, samples: int = 2000, method: str = "auto"):
+async def get_audio_peaks(job_id: str, samples: int = 0, method: str = "auto"):
     """
-    获取音频波形峰值数据
+    获取音频波形峰值数据（优化：动态采样密度）
 
     Args:
         job_id: 任务ID
-        samples: 采样点数（默认2000）
+        samples: 采样点数（0=自动计算，建议传0）
         method: 生成方法 - "auto"(自动选择), "ffmpeg"(FFmpeg加速), "wave"(Python原生)
 
     Returns:
@@ -640,6 +702,34 @@ async def get_audio_peaks(job_id: str, samples: int = 2000, method: str = "auto"
     """
     job_dir = config.JOBS_DIR / job_id
     audio_file = job_dir / "audio.wav"
+
+    # 【关键修改】获取音频时长，动态计算采样点
+    if samples <= 0:
+        # 获取视频/音频时长
+        video_file = _find_video_file(job_dir)
+        duration = 0.0
+
+        if video_file:
+            duration = await _get_video_duration(video_file)
+
+        # 如果从视频获取失败，尝试从音频获取
+        if duration <= 0 and audio_file.exists():
+            try:
+                # 先尝试用 FFmpeg 快速获取时长
+                duration = await _get_video_duration(audio_file)
+            except:
+                # 降级：使用默认值
+                duration = 60
+
+        if duration <= 0:
+            duration = 60  # 最终降级默认值
+
+        # 每秒20个采样点，保证放大后的连续性
+        # 上限100k（约800KB JSON），下限4k
+        target_samples = int(duration * 20)
+        samples = max(4000, min(target_samples, 100000))
+        print(f"[media] 动态采样：时长{duration:.1f}s → {samples}个采样点")
+
     peaks_cache_file = job_dir / f"peaks_{samples}.json"
 
     # 检查缓存
@@ -980,6 +1070,170 @@ async def get_sprite_image(job_id: str):
     return FileResponse(str(sprite_file), media_type="image/jpeg")
 
 
+@router.get("/{job_id}/video/preview")
+async def get_preview_video(job_id: str, request: Request):
+    """
+    获取 360p 预览视频（渐进式加载第一阶段）
+
+    用于在转码过程中快速预览视频内容
+    """
+    job_dir = config.JOBS_DIR / job_id
+
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 查找 360p 预览视频
+    preview_360p = job_dir / "preview_360p.mp4"
+    if preview_360p.exists():
+        return _serve_file_with_range(preview_360p, request, 'video/mp4')
+
+    # 如果没有 360p，尝试返回 720p proxy
+    proxy_video = job_dir / "proxy.mp4"
+    if proxy_video.exists():
+        return _serve_file_with_range(proxy_video, request, 'video/mp4')
+
+    # 都没有，返回 202 表示正在生成
+    raise HTTPException(
+        status_code=202,
+        detail={
+            "message": "预览视频正在生成中...",
+            "generating": True
+        }
+    )
+
+
+@router.get("/{job_id}/status/progressive")
+async def get_progressive_status(job_id: str):
+    """
+    获取渐进式加载状态
+
+    返回当前视频生成的状态信息，包括：
+    - 是否需要转码
+    - 360p 预览进度/状态
+    - 720p 高质量进度/状态
+    - 可用的视频 URL
+    """
+    job_dir = config.JOBS_DIR / job_id
+
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 检查各种视频文件
+    video_file = _find_video_file(job_dir)
+    preview_360p = job_dir / "preview_360p.mp4"
+    proxy_720p = job_dir / "proxy.mp4"
+
+    # 判断是否需要转码
+    needs_transcode = False
+    transcode_reason = ""
+
+    if video_file:
+        if video_file.suffix.lower() in NEED_TRANSCODE_FORMATS:
+            needs_transcode = True
+            transcode_reason = f"格式不兼容 ({video_file.suffix})"
+        elif video_file.suffix.lower() in BROWSER_COMPATIBLE_FORMATS:
+            codec = _get_video_codec(video_file)
+            if codec and codec in NEED_TRANSCODE_CODECS:
+                needs_transcode = True
+                transcode_reason = f"编码不兼容 ({codec.upper()})"
+
+    # 获取生成状态
+    preview_status = None
+    proxy_status = None
+
+    if job_id in _proxy_generation_status:
+        status_info = _proxy_generation_status[job_id]
+        # 这里的状态主要是 720p 的状态
+        proxy_status = {
+            "status": status_info.get("status", "not_started"),
+            "progress": status_info.get("progress", 0)
+        }
+
+    # 构建响应
+    result = {
+        "job_id": job_id,
+        "needs_transcode": needs_transcode,
+        "transcode_reason": transcode_reason,
+        "preview_360p": {
+            "exists": preview_360p.exists(),
+            "url": f"/api/media/{job_id}/video/preview" if preview_360p.exists() else None,
+            "size": preview_360p.stat().st_size if preview_360p.exists() else 0
+        },
+        "proxy_720p": {
+            "exists": proxy_720p.exists(),
+            "url": f"/api/media/{job_id}/video" if proxy_720p.exists() else None,
+            "size": proxy_720p.stat().st_size if proxy_720p.exists() else 0,
+            "status": proxy_status
+        },
+        "source": {
+            "exists": video_file is not None,
+            "filename": video_file.name if video_file else None,
+            "compatible": not needs_transcode,
+            "url": f"/api/media/{job_id}/video" if video_file and not needs_transcode else None
+        },
+        "recommended_url": None  # 推荐使用的视频 URL
+    }
+
+    # 确定推荐的视频 URL
+    if proxy_720p.exists():
+        result["recommended_url"] = f"/api/media/{job_id}/video"
+        result["current_resolution"] = "720p"
+    elif preview_360p.exists():
+        result["recommended_url"] = f"/api/media/{job_id}/video/preview"
+        result["current_resolution"] = "360p"
+    elif video_file and not needs_transcode:
+        result["recommended_url"] = f"/api/media/{job_id}/video"
+        result["current_resolution"] = "source"
+    else:
+        result["current_resolution"] = None
+
+    return JSONResponse(result)
+
+
+@router.post("/{job_id}/generate-preview")
+async def trigger_preview_generation(job_id: str):
+    """
+    手动触发 360p 预览视频生成
+
+    在某些情况下，可能需要手动触发预览生成
+    """
+    job_dir = config.JOBS_DIR / job_id
+
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    video_file = _find_video_file(job_dir)
+    if not video_file:
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+
+    preview_360p = job_dir / "preview_360p.mp4"
+
+    if preview_360p.exists():
+        return JSONResponse({
+            "success": True,
+            "message": "预览视频已存在",
+            "url": f"/api/media/{job_id}/video/preview"
+        })
+
+    # 异步生成 360p 预览
+    from utils.progressive_video_generator import progressive_video_generator
+    try:
+        from services.sse_service import get_sse_manager
+        progressive_video_generator.set_sse_manager(get_sse_manager())
+    except:
+        pass
+
+    asyncio.create_task(
+        progressive_video_generator.generate_360p_preview(job_id, video_file, preview_360p)
+    )
+
+    return JSONResponse({
+        "success": True,
+        "message": "预览视频生成已启动",
+        "generating": True
+    })
+
+
 @router.post("/{job_id}/post-process")
 async def post_process_transcription(job_id: str):
     """
@@ -1002,13 +1256,12 @@ async def post_process_transcription(job_id: str):
         "proxy_needed": False
     }
 
-    # 1. 生成波形峰值
+    # 1. 生成波形峰值（使用动态采样）
     try:
         audio_file = job_dir / "audio.wav"
         if audio_file.exists():
-            peaks_cache = job_dir / "peaks_2000.json"
-            if not peaks_cache.exists():
-                await get_audio_peaks(job_id, 2000)
+            # 使用 samples=0 让后端自动计算采样点数
+            await get_audio_peaks(job_id, 0)
             results["peaks"] = True
     except Exception as e:
         print(f"[media] 波形生成失败: {e}")
@@ -1127,9 +1380,13 @@ async def save_srt_content(job_id: str, request: Request):
 
 
 @router.get("/{job_id}/info")
-async def get_media_info(job_id: str):
+async def get_media_info(job_id: str, retry_missing: bool = True):
     """
-    获取任务的媒体信息摘要
+    获取任务的媒体信息摘要（支持自动重试生成缺失资源）
+
+    Args:
+        job_id: 任务ID
+        retry_missing: 是否在资源缺失时尝试重新生成（默认True）
 
     Returns:
         JSON: 包含视频、音频、SRT等文件的可用状态
@@ -1145,6 +1402,7 @@ async def get_media_info(job_id: str):
     peaks_cache = job_dir / "peaks_2000.json"
     sprite_cache = job_dir / "sprite_10.json"
     thumbnails_cache = job_dir / "thumbnails_10.json"
+    thumbnail_single = job_dir / "thumbnail.jpg"
 
     srt_file = None
     for file in job_dir.iterdir():
@@ -1154,10 +1412,44 @@ async def get_media_info(job_id: str):
 
     needs_proxy = video_file and video_file.suffix.lower() in NEED_TRANSCODE_FORMATS
 
+    # 检查编码是否需要转码（如 HEVC 等浏览器不兼容的编码）
+    video_codec = None
+    if video_file and not needs_proxy and video_file.suffix.lower() in BROWSER_COMPATIBLE_FORMATS:
+        video_codec = _get_video_codec(video_file)
+        if video_codec and video_codec in NEED_TRANSCODE_CODECS:
+            needs_proxy = True
+
     # 获取Proxy生成状态
     proxy_status = None
     if job_id in _proxy_generation_status:
         proxy_status = _proxy_generation_status[job_id]
+
+    # 智能重试：如果资源缺失且启用重试，则尝试异步生成
+    if retry_missing:
+        # 1. 如果波形数据缺失但音频文件存在，触发生成
+        if not peaks_cache.exists() and audio_file.exists():
+            try:
+                print(f"[media] 检测到波形数据缺失，尝试生成: {job_id}")
+                asyncio.create_task(_auto_generate_peaks(job_id, audio_file, peaks_cache))
+            except Exception as e:
+                print(f"[media] 波形数据生成失败: {e}")
+
+        # 2. 如果缩略图缺失但视频文件存在，触发生成
+        if not thumbnail_single.exists() and video_file:
+            try:
+                print(f"[media] 检测到缩略图缺失，尝试生成: {job_id}")
+                asyncio.create_task(_auto_generate_thumbnail(job_id, video_file, thumbnail_single))
+            except Exception as e:
+                print(f"[media] 缩略图生成失败: {e}")
+
+        # 3. 如果需要Proxy但不存在且未在生成中，触发生成
+        if needs_proxy and not proxy_video.exists():
+            if not (proxy_status and proxy_status.get("status") == "processing"):
+                try:
+                    print(f"[media] 检测到Proxy缺失，尝试生成: {job_id}")
+                    asyncio.create_task(_generate_proxy_video_with_progress(video_file, proxy_video, job_id))
+                except Exception as e:
+                    print(f"[media] Proxy视频生成失败: {e}")
 
     return JSONResponse({
         "job_id": job_id,
@@ -1165,6 +1457,7 @@ async def get_media_info(job_id: str):
             "exists": video_file is not None,
             "filename": video_file.name if video_file else None,
             "format": video_file.suffix if video_file else None,
+            "codec": video_codec,  # 视频编码（如 h264, hevc）
             "needs_proxy": needs_proxy,
             "proxy_exists": proxy_video.exists(),
             "proxy_generating": proxy_status and proxy_status.get("status") == "processing",
@@ -1177,13 +1470,17 @@ async def get_media_info(job_id: str):
         },
         "peaks": {
             "exists": peaks_cache.exists(),
+            "generating": not peaks_cache.exists() and audio_file.exists() and retry_missing,
             "url": f"/api/media/{job_id}/peaks" if audio_file.exists() else None
         },
         "thumbnails": {
             "exists": thumbnails_cache.exists() or sprite_cache.exists(),
             "sprite_exists": sprite_cache.exists(),
+            "single_exists": thumbnail_single.exists(),
+            "generating": not thumbnail_single.exists() and video_file and retry_missing,
             "url": f"/api/media/{job_id}/thumbnails" if video_file else None,
-            "sprite_url": f"/api/media/{job_id}/sprite.jpg" if sprite_cache.exists() else None
+            "sprite_url": f"/api/media/{job_id}/sprite.jpg" if sprite_cache.exists() else None,
+            "thumbnail_url": f"/api/media/{job_id}/thumbnail" if video_file else None
         },
         "srt": {
             "exists": srt_file is not None,
@@ -1191,3 +1488,100 @@ async def get_media_info(job_id: str):
             "url": f"/api/media/{job_id}/srt" if srt_file else None
         }
     })
+
+
+async def _auto_generate_peaks(job_id: str, audio_file: Path, peaks_cache: Path):
+    """自动生成波形数据（后台任务）- 使用动态采样"""
+    try:
+        # 获取视频时长以计算动态采样点数
+        job_dir = config.JOBS_DIR / job_id
+        video_file = _find_video_file(job_dir)
+        duration = 0.0
+
+        if video_file:
+            duration = await _get_video_duration(video_file)
+
+        if duration <= 0 and audio_file.exists():
+            try:
+                duration = await _get_video_duration(audio_file)
+            except:
+                duration = 60
+
+        if duration <= 0:
+            duration = 60
+
+        # 动态计算采样点数：每秒20个点
+        target_samples = int(duration * 20)
+        samples = max(4000, min(target_samples, 100000))
+        print(f"[media] 自动生成波形：时长{duration:.1f}s → {samples}个采样点")
+
+        file_size_mb = audio_file.stat().st_size / (1024 * 1024)
+        use_ffmpeg = file_size_mb > 50
+
+        if use_ffmpeg:
+            peaks, duration = _generate_peaks_with_ffmpeg(audio_file, samples)
+        else:
+            peaks, duration = _generate_peaks_with_wave(audio_file, samples)
+
+        # 如果FFmpeg失败，回退到wave
+        if not peaks and use_ffmpeg:
+            peaks, duration = _generate_peaks_with_wave(audio_file, samples)
+
+        if peaks:
+            result = {
+                "peaks": peaks,
+                "duration": duration,
+                "method": "auto_ffmpeg" if use_ffmpeg else "auto_wave",
+                "samples": len(peaks) // 2
+            }
+            with open(peaks_cache, 'w') as f:
+                json.dump(result, f)
+            print(f"[media] 波形数据自动生成成功: {job_id}")
+    except Exception as e:
+        print(f"[media] 波形数据自动生成失败 [{job_id}]: {e}")
+
+
+async def _auto_generate_thumbnail(job_id: str, video_file: Path, thumbnail_file: Path):
+    """自动生成缩略图（后台任务）"""
+    try:
+        import base64
+
+        # 获取视频分辨率
+        width, height = await _get_video_resolution(video_file)
+
+        # 计算缩略图尺寸
+        if width > 3840:  # 4K视频
+            thumb_width = 1920
+        elif width > 1920:
+            thumb_width = width
+        elif width > 0:
+            thumb_width = width
+        else:
+            thumb_width = 1280
+
+        ffmpeg_cmd = config.get_ffmpeg_command()
+        cmd = [
+            ffmpeg_cmd,
+            '-ss', '1',
+            '-i', str(video_file),
+            '-vframes', '1',
+            '-f', 'image2pipe',
+            '-vcodec', 'mjpeg',
+            '-vf', f'scale={thumb_width}:-1',
+            '-q:v', '2',
+            '-'
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout:
+            with open(thumbnail_file, 'wb') as f:
+                f.write(result.stdout)
+            print(f"[media] 缩略图自动生成成功: {job_id} (宽度: {thumb_width}px)")
+    except Exception as e:
+        print(f"[media] 缩略图自动生成失败 [{job_id}]: {e}")
+

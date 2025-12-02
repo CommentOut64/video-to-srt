@@ -1,5 +1,6 @@
 <template>
-  <div class="playback-controls" :class="{ compact }">
+  <!-- 底座模式或紧凑模式 -->
+  <div class="playback-controls" :class="{ compact, pedestal }">
     <!-- 主控制区 -->
     <div class="controls-main">
       <!-- 快退 -->
@@ -106,10 +107,12 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useProjectStore } from '@/stores/projectStore'
+import { usePlaybackManager } from '@/services/PlaybackManager'
 
 // Props
 const props = defineProps({
   compact: { type: Boolean, default: false },
+  pedestal: { type: Boolean, default: false },  // 底座模式：融入背景，无圆角
   showSpeed: { type: Boolean, default: true },
   showVolume: { type: Boolean, default: true },
   showLoop: { type: Boolean, default: true },
@@ -122,6 +125,9 @@ const emit = defineEmits(['play', 'pause', 'seek', 'speed-change', 'volume-chang
 // Store
 const projectStore = useProjectStore()
 
+// 全局播放管理器（单例）
+const playbackManager = usePlaybackManager()
+
 // Refs
 const progressRef = ref(null)
 const speedBtnRef = ref(null)
@@ -132,7 +138,6 @@ const isLooping = ref(false)
 const isMuted = ref(false)
 const previousVolume = ref(1)
 const showSpeedMenu = ref(false)
-const isDragging = ref(false)
 const bufferedPercent = ref(0)
 
 // 倍速选项
@@ -153,14 +158,14 @@ const progressPercent = computed(() => {
 
 // 播放/暂停
 function togglePlay() {
-  projectStore.player.isPlaying = !projectStore.player.isPlaying
+  playbackManager.togglePlay()
   emit(projectStore.player.isPlaying ? 'play' : 'pause')
 }
 
 // 跳转
 function seek(seconds) {
   const newTime = Math.max(0, Math.min(duration.value, currentTime.value + seconds))
-  projectStore.seekTo(newTime)
+  playbackManager.seekTo(newTime)
   emit('seek', newTime)
 }
 
@@ -170,29 +175,32 @@ function handleProgressClick(e) {
   const rect = progressRef.value.getBoundingClientRect()
   const percent = (e.clientX - rect.left) / rect.width
   const newTime = percent * duration.value
-  projectStore.seekTo(newTime)
+  playbackManager.seekTo(newTime)
   emit('seek', newTime)
 }
 
 // 拖拽进度条
 function startDrag(e) {
-  isDragging.value = true
+  e.preventDefault()  // 阻止默认行为，防止文本选择干扰拖拽
+  playbackManager.startDragging('progressBar')
   document.addEventListener('mousemove', onDrag)
   document.addEventListener('mouseup', stopDrag)
 }
 
 function onDrag(e) {
-  if (!isDragging.value || !progressRef.value || !duration.value) return
+  if (!progressRef.value || !duration.value) return
+  if (!playbackManager.isDragging()) return  // 如果不在拖拽状态，停止处理
+  
   const rect = progressRef.value.getBoundingClientRect()
   const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
   const newTime = percent * duration.value
-  projectStore.seekTo(newTime)
+  playbackManager.updateDragging(newTime)
 }
 
 function stopDrag() {
-  isDragging.value = false
   document.removeEventListener('mousemove', onDrag)
   document.removeEventListener('mouseup', stopDrag)
+  playbackManager.stopDragging()
 }
 
 // 音量控制
@@ -279,12 +287,26 @@ onUnmounted(() => {
   border-radius: var(--radius-lg);
   user-select: none;
 
+  // 紧凑模式
   &.compact {
     gap: 12px;
     padding: 8px 12px;
 
     .controls-progress {
       .time-display { font-size: 11px; }
+    }
+  }
+
+  // 底座模式：融入背景，无圆角
+  &.pedestal {
+    border-radius: 0;
+    background: var(--bg-primary);
+    height: 48px;
+    padding: 0 20px;
+    border: none;
+
+    .controls-progress .time-display {
+      font-size: 11px;
     }
   }
 }

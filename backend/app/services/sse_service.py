@@ -238,6 +238,13 @@ class SSEManager:
                 self.broadcast(channel_id, event, data),
                 loop
             )
+            # 不等待结果，避免阻塞后台线程
+        except RuntimeError as e:
+            # 忽略事件循环关闭时的错误（_call_connection_lost异常）
+            if "Event loop is closed" in str(e) or "_ProactorBasePipeTransport" in str(e):
+                logger.debug(f"事件循环已关闭，跳过SSE推送: {channel_id}")
+            else:
+                logger.warning(f"SSE推送调度失败: {e}")
         except Exception as e:
             logger.warning(f"SSE推送调度失败: {e}")
 

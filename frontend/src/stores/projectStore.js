@@ -24,6 +24,15 @@ export const useProjectStore = defineStore("project", () => {
     hasProxyVideo: false, // 是否有 Proxy 视频
     lastSaved: Date.now(), // 最后保存时间
     isDirty: false, // 是否有未保存修改
+    // 渐进式加载相关
+    needsTranscode: false, // 是否需要转码
+    transcodeReason: "", // 转码原因
+    currentResolution: null, // 当前视频分辨率 ('360p', '720p', 'source')
+    videoStatus: {
+      preview360p: false, // 是否有 360p 预览
+      proxy720p: false, // 是否有 720p Proxy
+      sourceCompatible: false, // 源视频是否兼容浏览器
+    },
   });
 
   // ========== 2. 字幕数据（Single Source of Truth） ==========
@@ -49,6 +58,7 @@ export const useProjectStore = defineStore("project", () => {
     isPlaying: false, // 是否正在播放
     playbackRate: 1.0, // 播放速度（0.5-4.0）
     volume: 1.0, // 音量（0.0-1.0）
+    isSeeking: false, // 全局Seek锁：标记用户是否正在主动跳转（解决进度条拖动循环问题）
   });
 
   // ========== 5. 视图状态 ==========
@@ -341,16 +351,27 @@ export const useProjectStore = defineStore("project", () => {
       peaksPath: null,
       duration: 0,
       filename: "",
+      title: "",
       videoFormat: null,
       hasProxyVideo: false,
       lastSaved: Date.now(),
       isDirty: false,
+      // 渐进式加载相关
+      needsTranscode: false,
+      transcodeReason: "",
+      currentResolution: null,
+      videoStatus: {
+        preview360p: false,
+        proxy720p: false,
+        sourceCompatible: false,
+      },
     };
     player.value = {
       currentTime: 0,
       isPlaying: false,
       playbackRate: 1.0,
       volume: 1.0,
+      isSeeking: false,
     };
     clearHistory();
     console.log("[ProjectStore] 项目已重置");
