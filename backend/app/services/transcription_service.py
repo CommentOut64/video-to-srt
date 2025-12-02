@@ -947,8 +947,25 @@ class TranscriptionService:
             "device": job.settings.device,
             "word_timestamps": job.settings.word_timestamps,
             "compute_type": job.settings.compute_type,
-            "batch_size": job.settings.batch_size
+            "batch_size": job.settings.batch_size,
+            "demucs": {
+                "enabled": job.settings.demucs.enabled,
+                "mode": job.settings.demucs.mode,
+            }
         }
+
+        # 确保 demucs 字段存在（向后兼容）
+        if "demucs" not in data:
+            data["demucs"] = {
+                "enabled": job.settings.demucs.enabled,
+                "mode": job.settings.demucs.mode,
+                "bgm_level": "none",
+                "bgm_ratios": [],
+                "global_separation_done": False,
+                "vocals_path": None,
+                "circuit_breaker": None,
+                "retry_triggered": False
+            }
 
         checkpoint_path = job_dir / "checkpoint.json"
         temp_path = checkpoint_path.with_suffix(".tmp")

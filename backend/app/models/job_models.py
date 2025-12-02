@@ -11,6 +11,18 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class DemucsSettings:
+    """Demucs人声分离配置"""
+    enabled: bool = True                        # 是否启用Demucs
+    mode: str = "auto"                          # 模式: auto/always/never/on_demand
+    retry_threshold_logprob: float = -0.8       # 重试阈值（avg_logprob）
+    retry_threshold_no_speech: float = 0.6      # 重试阈值（no_speech_prob）
+    circuit_breaker_enabled: bool = True        # 是否启用熔断机制
+    consecutive_threshold: int = 3              # 连续重试触发熔断的阈值
+    ratio_threshold: float = 0.2                # 总重试比例触发熔断的阈值（20%）
+
+
+@dataclass
 class JobSettings:
     """转录任务设置"""
     model: str = "medium"
@@ -19,6 +31,7 @@ class JobSettings:
     batch_size: int = 16
     word_timestamps: bool = False
     cpu_affinity: Optional["CPUAffinityConfig"] = None  # 使用字符串形式的类型注解
+    demucs: DemucsSettings = field(default_factory=DemucsSettings)  # Demucs配置
 
 
 @dataclass
@@ -96,6 +109,15 @@ class JobState:
                 "device": self.settings.device,
                 "batch_size": self.settings.batch_size,
                 "word_timestamps": self.settings.word_timestamps,
+                "demucs": {
+                    "enabled": self.settings.demucs.enabled,
+                    "mode": self.settings.demucs.mode,
+                    "retry_threshold_logprob": self.settings.demucs.retry_threshold_logprob,
+                    "retry_threshold_no_speech": self.settings.demucs.retry_threshold_no_speech,
+                    "circuit_breaker_enabled": self.settings.demucs.circuit_breaker_enabled,
+                    "consecutive_threshold": self.settings.demucs.consecutive_threshold,
+                    "ratio_threshold": self.settings.demucs.ratio_threshold,
+                }
             },
             "updated_at": time.time()
         }
@@ -112,12 +134,26 @@ class JobState:
             JobState: 恢复的任务状态对象
         """
         settings_data = data.get("settings", {})
+
+        # 处理 Demucs 配置（向后兼容：如果没有则使用默认值）
+        demucs_data = settings_data.get("demucs", {})
+        demucs_settings = DemucsSettings(
+            enabled=demucs_data.get("enabled", True),
+            mode=demucs_data.get("mode", "auto"),
+            retry_threshold_logprob=demucs_data.get("retry_threshold_logprob", -0.8),
+            retry_threshold_no_speech=demucs_data.get("retry_threshold_no_speech", 0.6),
+            circuit_breaker_enabled=demucs_data.get("circuit_breaker_enabled", True),
+            consecutive_threshold=demucs_data.get("consecutive_threshold", 3),
+            ratio_threshold=demucs_data.get("ratio_threshold", 0.2),
+        )
+
         settings = JobSettings(
             model=settings_data.get("model", "medium"),
             compute_type=settings_data.get("compute_type", "float16"),
             device=settings_data.get("device", "cuda"),
             batch_size=settings_data.get("batch_size", 16),
             word_timestamps=settings_data.get("word_timestamps", False),
+            demucs=demucs_settings,
         )
 
         return cls(
