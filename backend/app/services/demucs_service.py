@@ -9,7 +9,7 @@ import logging
 import tempfile
 import hashlib
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from enum import Enum
 from dataclasses import dataclass, field
 
@@ -58,6 +58,78 @@ class DemucsConfig:
         "htdemucs_ft",    # Fine-tuned
         "mdx_extra_q",    # 量化版（小显存）
     ])
+
+
+@dataclass
+class ModelTierConfig:
+    """
+    分级模型配置
+    定义不同场景下使用的模型及其质量参数
+    """
+    # 弱BGM场景使用的模型（速度优先）
+    weak_model: str = "htdemucs_ft"
+
+    # 强BGM场景使用的模型（质量优先）
+    strong_model: str = "mdx_extra_q"
+
+    # 兜底模型（熔断升级后使用）
+    fallback_model: str = "mdx_extra"
+
+    # 模型质量参数（按模型分别配置）
+    model_quality: Dict[str, Dict] = field(default_factory=lambda: {
+        "htdemucs": {"shifts": 1, "overlap": 0.25},      # 最快
+        "htdemucs_ft": {"shifts": 1, "overlap": 0.25},   # 快速+人声优化
+        "mdx_extra_q": {"shifts": 2, "overlap": 0.5},    # 中等
+        "mdx_extra": {"shifts": 2, "overlap": 0.5},      # 最高质量
+    })
+
+
+@dataclass
+class SeparationStrategy:
+    """
+    分离策略决策结果
+    由 SeparationStrategyResolver 生成，描述本次任务应采用的分离策略
+    """
+    should_separate: bool           # 是否需要分离
+    initial_model: Optional[str]    # 初始使用的模型
+    fallback_model: Optional[str]   # 升级后的模型（如果允许升级）
+    reason: str                     # 决策原因（用于日志和SSE）
+    bgm_level: BGMLevel             # 检测到的BGM级别
+    allow_escalation: bool          # 是否允许升级
+
+    def to_dict(self) -> dict:
+        """转换为字典（用于SSE推送）"""
+        return {
+            "should_separate": self.should_separate,
+            "initial_model": self.initial_model,
+            "fallback_model": self.fallback_model,
+            "reason": self.reason,
+            "bgm_level": self.bgm_level.value,
+            "allow_escalation": self.allow_escalation,
+        }
+
+
+# 质量预设映射
+QUALITY_PRESETS = {
+    "fast": {
+        "weak_model": "htdemucs",
+        "strong_model": "htdemucs_ft",
+        "fallback_model": "mdx_extra_q",
+        "description": "速度优先，适合低配机器",
+    },
+    "balanced": {
+        "weak_model": "htdemucs_ft",
+        "strong_model": "mdx_extra_q",
+        "fallback_model": "mdx_extra",
+        "description": "平衡模式（默认推荐）",
+    },
+    "quality": {
+        "weak_model": "mdx_extra_q",
+        "strong_model": "mdx_extra",
+        "fallback_model": "mdx_extra",
+        "description": "质量优先，处理时间较长",
+    },
+}
 
 
 class DemucsService:
