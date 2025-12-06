@@ -25,7 +25,6 @@ class ProcessPhase(Enum):
     VAD = "vad"
     SENSEVOICE = "sensevoice"
     WHISPER_PATCH = "whisper"
-    WHISPERX_ALIGN = "whisperx"
     LLM_PROOF = "llm_proof"
     LLM_TRANS = "llm_trans"
     SRT = "srt"
@@ -68,7 +67,6 @@ class PresetWeights:
     vad: float = 5
     sensevoice: float = 40
     whisper: float = 0
-    whisperx: float = 0
     llm_proof: float = 0
     llm_trans: float = 0
     srt: float = 10
@@ -102,7 +100,7 @@ class PresetWeights:
         return (
             self.extract + self.bgm_detect + self.spectrum_analysis +
             self.demucs + self.vad + self.sensevoice + self.whisper +
-            self.whisperx + self.llm_proof + self.llm_trans + self.srt
+            self.llm_proof + self.llm_trans + self.srt
         )
 
     def to_dict(self) -> Dict[str, float]:
@@ -115,7 +113,6 @@ class PresetWeights:
             "vad": self.vad,
             "sensevoice": self.sensevoice,
             "whisper": self.whisper,
-            "whisperx": self.whisperx,
             "llm_proof": self.llm_proof,
             "llm_trans": self.llm_trans,
             "srt": self.srt
@@ -147,7 +144,6 @@ class ProgressTracker:
             ProcessPhase.VAD: self.weights.vad,
             ProcessPhase.SENSEVOICE: self.weights.sensevoice,
             ProcessPhase.WHISPER_PATCH: self.weights.whisper,
-            ProcessPhase.WHISPERX_ALIGN: self.weights.whisperx,
             ProcessPhase.LLM_PROOF: self.weights.llm_proof,
             ProcessPhase.LLM_TRANS: self.weights.llm_trans,
             ProcessPhase.SRT: self.weights.srt,

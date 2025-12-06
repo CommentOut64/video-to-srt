@@ -21,7 +21,6 @@
 ### v2.0 新增（时空解耦架构）
 
 - ✅ **修改**：熔断决策增加 `WHISPER_TEXT_ONLY` 动作（仅取文本，使用伪对齐）
-- ✅ **修改**：熔断决策增加 `WHISPERX_ALIGN` 动作（可选强制对齐）
 - ✅ **修改**：熔断决策增加 `LLM_ARBITRATE` 动作（LLM 仲裁）
 - ✅ **新增**：组合方案矩阵 `solution_matrix.py`
 - ✅ **新增**：前端预设方案体系
@@ -80,7 +79,7 @@
 
 2. **时空解耦原则（新增）**
    - Whisper 补刀**仅取文本**，时间戳由 SenseVoice 确定
-   - 默认使用伪对齐，可选启用 WhisperX 强制对齐
+   - 默认使用伪对齐
 
 3. **止损点机制**
    - `max_retry_count = 1`，防止无限循环
@@ -797,7 +796,6 @@ class SolutionConfig:
 
     # 高级选项
     confidence_threshold: float = 0.6
-    enable_whisperx_align: bool = False
 
     @classmethod
     def from_preset(cls, preset_id: str) -> 'SolutionConfig':
@@ -860,13 +858,6 @@ SOLUTION_MATRIX = {
         "scenario": "嘈杂、多BGM环境",
         "note": "默认推荐。仅对低置信度片段进行Whisper重听，伪对齐"
     },
-    "B2": {
-        "name": "SenseVoice + Whisper Partial + WhisperX",
-        "flow": ["sensevoice", "whisper_partial", "whisperx_align"],
-        "scenario": "极高精度时间轴需求（卡拉OK、歌词）",
-        "note": "高成本。补刀后强制对齐（可选模块）"
-    },
-
     # ========== 语义层（可叠加） ==========
     "P1": {
         "name": "LLM Partial Proof",
@@ -957,7 +948,7 @@ def calculate_dynamic_weights(
     根据引擎和实际场景动态计算权重
 
     Args:
-        engine: 'whisperx' | 'sensevoice'
+        engine: 'faster_whisper' | 'sensevoice'
         total_segments: 总片段数
         segments_to_separate: 需要分离的片段数
         segments_to_retry: 需要补刀的片段数
@@ -965,7 +956,7 @@ def calculate_dynamic_weights(
     Returns:
         动态权重字典
     """
-    if engine == 'whisperx':
+    if engine == 'faster_whisper':
         return self.PHASE_WEIGHTS.copy()
 
     base_weights = self.PHASE_WEIGHTS.copy()
@@ -1010,7 +1001,6 @@ def calculate_dynamic_weights(
 ### 时空解耦架构
 
 - [ ] 熔断决策器支持 `WHISPER_TEXT_ONLY` 动作
-- [ ] 熔断决策器支持 `WHISPERX_ALIGN` 动作（可选）
 - [ ] 熔断决策器支持 `LLM_ARBITRATE` 动作
 - [ ] 组合方案矩阵正确配置 6 个预设
 - [ ] `SolutionConfig.from_preset()` 正确返回配置
@@ -1025,7 +1015,7 @@ def calculate_dynamic_weights(
 
 2. **时空解耦原则**：
    - Whisper 补刀时**仅取文本**，弃用其时间戳
-   - 默认使用伪对齐，WhisperX 为可选模块
+   - 默认使用伪对齐
 
 3. **组合方案矩阵**：
    - 前端预设对应后端 `SolutionConfig`

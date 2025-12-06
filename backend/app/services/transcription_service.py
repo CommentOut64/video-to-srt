@@ -9,7 +9,6 @@ from enum import Enum
 from dataclasses import dataclass, field
 from collections import OrderedDict  # 新增导入
 from pydub import AudioSegment, silence
-# 使用 Faster-Whisper 替代 whisperx
 from .whisper_service import get_whisper_service, load_audio as whisper_load_audio
 import torch
 import shutil
@@ -355,7 +354,6 @@ from core.config import config  # 导入统一配置
 # 全局模型缓存 (按 (model, compute_type, device) 键)
 _model_cache: Dict[Tuple[str, str, str], object] = {}
 
-# [已删除] 对齐模型缓存 - 新架构不再使用 WhisperX 对齐模型
 
 _model_lock = threading.Lock()
 
@@ -3103,10 +3101,7 @@ class TranscriptionService:
                     job.message = "模型下载并加载完成"
                 return m
 
-    # [已删除] _get_align_model 方法
-    # 新架构使用伪对齐 (pseudo_alignment) 替代 WhisperX 强制对齐
-    # 详见 services/pseudo_alignment.py
-
+  
     def _transcribe_segment_unaligned(
         self,
         seg: Dict,
@@ -3381,14 +3376,9 @@ class TranscriptionService:
         audio_path: str
     ) -> List[Dict]:
         """
-        [已废弃] 原 WhisperX 对齐方法
+        合并转录结果的分段
 
-        新架构说明：
-        - 不再使用 WhisperX 强制对齐
-        - Faster-Whisper 转录已包含时间戳
-        - 如需更精细的字级时间戳，使用 pseudo_alignment 模块
-
-        现在此方法仅合并所有 segments 并返回，不执行对齐操作。
+        此方法合并所有 segments 并返回，不执行对齐操作。
         """
         self.logger.info(f"合并 {len(unaligned_results)} 个分段的转录结果（跳过强制对齐）")
 
@@ -3468,14 +3458,9 @@ class TranscriptionService:
         processing_mode: ProcessingMode
     ) -> List[Dict]:
         """
-        [已废弃] 原 WhisperX 批量对齐方法
+        批量处理转录结果的分段
 
-        新架构说明：
-        - 不再使用 WhisperX 强制对齐
-        - Faster-Whisper 转录已包含时间戳
-        - 如需更精细的字级时间戳，使用 pseudo_alignment 模块
-
-        现在此方法仅合并所有 segments，应用时间校验和微调，然后返回。
+        此方法合并所有 segments，应用时间校验和微调，然后返回。
         """
         self.logger.info(f"处理 {len(unaligned_results)} 个分段的转录结果（跳过强制对齐）")
 
@@ -3533,8 +3518,7 @@ class TranscriptionService:
         字幕时间微调 - 修正对齐偏差
 
         问题背景：
-        WhisperX对齐后的字幕常常"抢先出现"（开始时间过早），
-        这是因为VAD和对齐算法倾向于保守估计（宁早勿迟）。
+        转录后的字幕可能出现时间偏差，需要适当调整。
 
         解决方案：
         1. 将字幕开始时间延后 start_delay_ms（默认25ms）

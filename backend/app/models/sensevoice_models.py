@@ -27,7 +27,6 @@ class TextSource(Enum):
     """文本来源"""
     SENSEVOICE = "sensevoice"            # SenseVoice 原始输出
     WHISPER_PATCH = "whisper_patch"      # Whisper 补刀替换
-    WHISPERX_ALIGN = "whisperx_align"    # WhisperX 强制对齐（可选）
     LLM_CORRECTION = "llm_correction"    # LLM 校对修正
     LLM_TRANSLATION = "llm_translation"  # LLM 翻译
 

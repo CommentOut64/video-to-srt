@@ -1,9 +1,5 @@
 """
 模型管理数据模型
-
-注意：新架构已移除 WhisperX 对齐模型支持
-- 使用 Faster-Whisper 替代 WhisperX
-- 使用伪对齐 (pseudo_alignment) 替代强制对齐
 """
 
 from dataclasses import dataclass
@@ -33,5 +29,3 @@ class ModelInfo:
         }
 
 
-# [已删除] AlignModelInfo 类
-# 新架构不再使用 WhisperX 对齐模型，使用伪对齐替代

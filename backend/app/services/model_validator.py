@@ -1,10 +1,6 @@
 """
 模型完整性验证工具
 负责验证模型文件的完整性
-
-注意：新架构已移除 WhisperX 对齐模型支持
-- 使用 Faster-Whisper 替代 WhisperX
-- 使用伪对齐 (pseudo_alignment) 替代强制对齐
 """
 
 from pathlib import Path
@@ -25,7 +21,7 @@ class ModelValidator:
         "tokenizer.json"
     ]
 
-    # [已删除] ALIGN_REQUIRED_FILES - 新架构不再使用对齐模型
+    # 对齐模型相关常量已移除
 
     @staticmethod
     def validate_whisper_model(model_path: Path) -> Tuple[bool, List[str], str]:
@@ -62,7 +58,7 @@ class ModelValidator:
 
         return is_complete, missing_files, detail
 
-    # [已删除] validate_align_model 方法 - 新架构不再使用对齐模型
+    # validate_align_model 方法已移除
 
     @staticmethod
     def find_model_snapshots(hub_dir: Path, model_name: str) -> List[Path]:

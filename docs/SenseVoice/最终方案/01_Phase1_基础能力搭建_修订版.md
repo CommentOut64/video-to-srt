@@ -72,7 +72,6 @@ class TextSource(Enum):
     """文本来源"""
     SENSEVOICE = "sensevoice"            # SenseVoice 原始输出
     WHISPER_PATCH = "whisper_patch"      # Whisper 补刀替换
-    WHISPERX_ALIGN = "whisperx_align"    # WhisperX 强制对齐（可选）
     LLM_CORRECTION = "llm_correction"    # LLM 校对修正
     LLM_TRANSLATION = "llm_translation"  # LLM 翻译
 
@@ -208,7 +207,6 @@ class SentenceSegment:
 - SenseVoice 确定的时间窗口（start/end）不可变
 - 当 Whisper/LLM 替换文本后，新字符均匀分布在原时间窗口内
 - 生成的字级时间戳标记为 is_pseudo=True
-- 如需高精度时间戳，可启用 WhisperX 强制对齐（可选）
 """
 from typing import List
 from ..models.sensevoice_models import WordTimestamp, TextSource
@@ -348,7 +346,6 @@ class ProcessPhase(Enum):
     VAD = "vad"
     SENSEVOICE = "sensevoice"
     WHISPER_PATCH = "whisper"
-    WHISPERX_ALIGN = "whisperx"
     LLM_PROOF = "llm_proof"
     LLM_TRANS = "llm_trans"
     SRT = "srt"
@@ -375,7 +372,6 @@ class PresetWeights:
     vad: float = 5
     sensevoice: float = 40
     whisper: float = 0
-    whisperx: float = 0
     llm_proof: float = 0
     llm_trans: float = 0
     srt: float = 10
@@ -398,7 +394,7 @@ class PresetWeights:
         return (
             self.extract + self.bgm_detect + self.demucs +
             self.vad + self.sensevoice + self.whisper +
-            self.whisperx + self.llm_proof + self.llm_trans + self.srt
+            self.llm_proof + self.llm_trans + self.srt
         )
 
 
@@ -423,7 +419,6 @@ class ProgressTracker:
             ProcessPhase.VAD: self.weights.vad,
             ProcessPhase.SENSEVOICE: self.weights.sensevoice,
             ProcessPhase.WHISPER_PATCH: self.weights.whisper,
-            ProcessPhase.WHISPERX_ALIGN: self.weights.whisperx,
             ProcessPhase.LLM_PROOF: self.weights.llm_proof,
             ProcessPhase.LLM_TRANS: self.weights.llm_trans,
             ProcessPhase.SRT: self.weights.srt,
@@ -630,7 +625,6 @@ SSE_PROGRESS_TAGS = {
     "progress.vad": "VAD 分段进度",
     "progress.sensevoice": "SenseVoice 转录进度（流式）",
     "progress.whisper": "Whisper 补刀进度",
-    "progress.whisperx": "WhisperX 对齐进度",
     "progress.llm_proof": "LLM 校对进度",
     "progress.llm_trans": "LLM 翻译进度",
     "progress.srt": "SRT 生成进度",

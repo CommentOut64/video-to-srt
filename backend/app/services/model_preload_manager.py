@@ -448,7 +448,7 @@ class ModelPreloadManager:
             # 导入配置以获取缓存路径
             from core.config import config
 
-            # 使用 faster_whisper 的 WhisperModel 替代 whisperx.load_model
+            # 使用 faster_whisper 的 WhisperModel 加载模型
             model = WhisperModel(
                 settings.model,
                 device=settings.device,
@@ -491,7 +491,7 @@ class ModelPreloadManager:
             import numpy as np
             dummy_audio = np.zeros(16000, dtype=np.float32)  # 16kHz 1秒
 
-            # 使用 faster_whisper 的 transcribe 方法预热
+            # 使用 transcribe 方法预热模型
             segments, _ = model.transcribe(dummy_audio)
             _ = list(segments)  # 触发生成器
 

@@ -23,8 +23,7 @@ class ModelPreloadConfig:
     PRELOAD_TIMEOUT = int(os.getenv("MODEL_PRELOAD_TIMEOUT", "300"))
     WARMUP_ENABLED = os.getenv("MODEL_WARMUP_ENABLED", "true").lower() == "true"
 
-    # [已删除] 对齐模型配置 - 新架构不再使用 WhisperX 对齐模型
-
+  
     # 内存监控配置
     MEMORY_CHECK_INTERVAL = int(os.getenv("MEMORY_CHECK_INTERVAL", "60"))  # 秒
     

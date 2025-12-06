@@ -4,8 +4,6 @@ Faster-Whisper 转录服务
 职责：
 - Whisper 补刀（后处理增强阶段）
 - 仅提供文本，时间戳由 SenseVoice 确定，使用伪对齐
-
-注意：本模块完全替代原 whisperx，使用 faster-whisper 作为底层引擎
 """
 from faster_whisper import WhisperModel
 from typing import Optional, Dict, Any, Union, Tuple
@@ -299,8 +297,6 @@ class WhisperService:
 def load_audio(audio_path: str, sr: int = 16000) -> np.ndarray:
     """
     加载音频文件为 numpy 数组
-
-    替代原 whisperx.load_audio() 函数
 
     Args:
         audio_path: 音频文件路径
