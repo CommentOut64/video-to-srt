@@ -349,11 +349,13 @@ class JobQueueService:
                     self.transcription_service.save_job_meta(job)
 
                     # 推送任务结束信号（单任务频道）
+                    # 使用统一的命名空间前缀格式：signal.{signal_type}
+                    signal_type = "job_complete" if job.status == "finished" else f"job_{job.status}"
                     self.sse_manager.broadcast_sync(
                         f"job:{job.job_id}",
-                        "signal",
+                        f"signal.{signal_type}",
                         {
-                            "signal": f"job_{job.status}",  # 统一使用 "signal" 字段
+                            "signal": signal_type,
                             "job_id": job.job_id,
                             "message": job.message,
                             "status": job.status,
@@ -532,8 +534,8 @@ class JobQueueService:
             "percent": round(job.progress, 1)
         }
 
-        self.sse_manager.broadcast_sync(f"job:{job_id}", "signal", data)
-        logger.debug(f"[单任务SSE] 推送信号: {job_id[:8]}... -> {signal}")
+        self.sse_manager.broadcast_sync(f"job:{job_id}", f"signal.{signal}", data)
+        logger.debug(f"[单任务SSE] 推送信号: {job_id[:8]}... -> signal.{signal}")
 
     def _load_settings(self):
         """加载队列设置"""

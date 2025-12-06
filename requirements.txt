@@ -31,8 +31,9 @@ ctranslate2==4.4.0
 # --- 关键：嵌入式 CUDA 12 运行库 ---
 # 虽然 PyTorch 用的是 cu11，但 CTranslate2 需要这些 cu12 的 DLL。
 # pip 安装会将它们放在 site-packages/nvidia 中，实现完美共存。
-nvidia-cublas-cu12
-nvidia-cudnn-cu12
+# 注意：ctranslate2 4.4.0 需要 cuDNN 8，不能用 cuDNN 9
+nvidia-cublas-cu12==12.1.3.1
+nvidia-cudnn-cu12==8.9.7.29
 
 # --- ONNX (兼容性配置) ---
 onnxruntime-gpu==1.18.0

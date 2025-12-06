@@ -54,11 +54,18 @@ class TranscriptionAPI {
    * 启动转录任务（加入队列）
    * @param {string} jobId - 任务ID
    * @param {Object} settings - 转录设置
+   * @param {string} settings.engine - 转录引擎 (whisper, sensevoice)
    * @param {string} settings.model - 模型名称 (tiny, base, small, medium, large-v2, large-v3)
    * @param {string} settings.compute_type - 计算类型 (float16, int8, etc.)
    * @param {string} settings.device - 设备 (cuda, cpu)
    * @param {number} settings.batch_size - 批次大小
    * @param {boolean} settings.word_timestamps - 是否生成词级时间戳
+   * @param {Object} settings.sensevoice - SenseVoice 配置（可选）
+   * @param {string} settings.sensevoice.preset_id - 预设ID (default, preset1-5)
+   * @param {string} settings.sensevoice.enhancement - 增强模式 (off, smart_patch, deep_listen)
+   * @param {string} settings.sensevoice.proofread - 校对模式 (off, sparse, full)
+   * @param {string} settings.sensevoice.translate - 翻译模式 (off, full, partial)
+   * @param {string} settings.sensevoice.target_language - 翻译目标语言
    * @returns {Promise<{job_id: string, started: boolean, queue_position: number}>}
    */
   async startJob(jobId, settings) {

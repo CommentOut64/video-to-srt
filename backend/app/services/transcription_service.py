@@ -1043,7 +1043,7 @@ class TranscriptionService:
                 "total": job.total,
                 "language": job.language or ""
             }
-            sse_manager.broadcast_sync(channel_id, "progress", progress_data)
+            sse_manager.broadcast_sync(channel_id, "progress.overall", progress_data)
 
             # 2. 推送到全局频道（TaskMonitor 使用）
             global_progress_data = {
@@ -1079,10 +1079,10 @@ class TranscriptionService:
             channel_id = f"job:{job.job_id}"
             sse_manager.broadcast_sync(
                 channel_id,
-                "signal",
+                f"signal.{signal_code}",
                 {
                     "job_id": job.job_id,
-                    "signal": signal_code,  # 统一使用 "signal" 字段
+                    "signal": signal_code,
                     "message": message or job.message,
                     "status": job.status,
                     "percent": job.progress
@@ -1156,7 +1156,7 @@ class TranscriptionService:
             channel_id = f"job:{job.job_id}"
             sse_manager.broadcast_sync(
                 channel_id,
-                "segment",
+                "subtitle.segment",
                 {
                     "segment_index": segment_result.get('segment_index', 0),
                     "segments": segment_result.get('segments', []),
@@ -1197,7 +1197,7 @@ class TranscriptionService:
 
             sse_manager.broadcast_sync(
                 channel_id,
-                "aligned",
+                "subtitle.aligned",
                 {
                     "segments": segments,
                     "word_segments": word_segments,
@@ -2449,7 +2449,7 @@ class TranscriptionService:
             }
 
             # 广播事件
-            sse_manager.broadcast_sync(channel_id, "bgm_detected", event_data)
+            sse_manager.broadcast_sync(channel_id, "signal.bgm_detected", event_data)
 
         except Exception as e:
             # SSE推送失败不应影响主流程
@@ -2473,7 +2473,7 @@ class TranscriptionService:
             event_data = strategy.to_dict()
 
             # 广播事件
-            sse_manager.broadcast_sync(channel_id, "separation_strategy", event_data)
+            sse_manager.broadcast_sync(channel_id, "signal.separation_strategy", event_data)
 
             self.logger.debug(f"分离策略事件已推送: {strategy.reason}")
 
@@ -2516,7 +2516,7 @@ class TranscriptionService:
             }
 
             # 广播事件
-            sse_manager.broadcast_sync(channel_id, "model_escalated", event_data)
+            sse_manager.broadcast_sync(channel_id, "signal.model_upgrade", event_data)
 
             self.logger.info(f"模型升级事件已推送: {from_model} -> {to_model}")
 
@@ -2552,7 +2552,7 @@ class TranscriptionService:
             }
 
             # 广播事件
-            sse_manager.broadcast_sync(channel_id, "circuit_breaker_triggered", event_data)
+            sse_manager.broadcast_sync(channel_id, "signal.circuit_breaker", event_data)
 
             self.logger.info("熔断事件已推送到前端")
 
@@ -3429,7 +3429,7 @@ class TranscriptionService:
 
             sse_manager.broadcast_sync(
                 channel_id,
-                "align_progress",  # 专用事件类型
+                "progress.align",
                 {
                     "job_id": job.job_id,
                     "phase": "align",
@@ -4304,11 +4304,11 @@ class TranscriptionService:
         from pathlib import Path
 
         def push_signal_event(sse_manager, job_id: str, signal_code: str, message: str = ""):
-            """推送信号事件"""
+            """推送信号事件（使用统一命名空间格式）"""
             sse_manager.broadcast_sync(
-                channel=f"job_{job_id}",
-                event_type="signal",
-                data={"code": signal_code, "message": message}
+                channel=f"job:{job_id}",
+                event_type=f"signal.{signal_code}",
+                data={"signal": signal_code, "message": message}
             )
 
         # 获取方案配置

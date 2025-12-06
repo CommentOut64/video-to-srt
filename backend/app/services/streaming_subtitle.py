@@ -25,7 +25,7 @@ def push_subtitle_event(sse_manager, job_id: str, event_type: str, data: dict):
         data: 事件数据
     """
     sse_manager.broadcast_sync(
-        channel=f"job_{job_id}",
+        channel=f"job:{job_id}",
         event_type=f"subtitle.{event_type}",
         data=data
     )

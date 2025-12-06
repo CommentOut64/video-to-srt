@@ -254,6 +254,42 @@
         </el-tab-pane>
       </el-tabs>
 
+      <!-- 转录设置区域 -->
+      <div class="transcription-settings">
+        <div class="settings-header" @click="showAdvancedSettings = !showAdvancedSettings">
+          <span>转录设置</span>
+          <el-icon :class="{ 'is-expanded': showAdvancedSettings }"><ArrowDown /></el-icon>
+        </div>
+
+        <div class="settings-content" v-if="showAdvancedSettings">
+          <!-- 引擎选择 -->
+          <div class="setting-row">
+            <label>转录引擎</label>
+            <el-radio-group v-model="transcriptionEngine" size="small">
+              <el-radio-button value="whisper">Whisper</el-radio-button>
+              <el-radio-button value="sensevoice">SenseVoice</el-radio-button>
+            </el-radio-group>
+          </div>
+
+          <!-- SenseVoice 预设选择（仅 SenseVoice 引擎时显示） -->
+          <div v-if="transcriptionEngine === 'sensevoice'" class="sensevoice-presets">
+            <div class="preset-grid">
+              <div
+                v-for="preset in sensevoicePresets"
+                :key="preset.id"
+                class="preset-card"
+                :class="{ active: selectedPresetId === preset.id }"
+                @click="selectedPresetId = preset.id"
+              >
+                <div class="preset-icon">{{ preset.icon }}</div>
+                <div class="preset-name">{{ preset.name }}</div>
+                <div class="preset-desc">{{ preset.desc }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <template #footer>
         <div class="dialog-footer">
           <span v-if="uploadMode === 'select'" class="selection-info">
@@ -312,6 +348,7 @@ import {
   Clock,
   Loading,
   Close,
+  ArrowDown,
 } from "@element-plus/icons-vue";
 import { useUnifiedTaskStore } from "@/stores/unifiedTaskStore";
 import { transcriptionApi, systemApi } from "@/services/api";
@@ -342,6 +379,34 @@ const editingTaskId = ref(null); // 当前正在编辑的任务ID
 const editingTitle = ref(""); // 编辑中的标题
 const originalTitle = ref(""); // 原始标题（用于恢复）
 const titleInputRef = ref(null); // 输入框引用
+
+// 转录设置相关
+const showAdvancedSettings = ref(false); // 是否显示高级设置
+const transcriptionEngine = ref("whisper"); // 转录引擎: whisper | sensevoice
+const selectedPresetId = ref("default"); // SenseVoice 预设 ID
+
+// SenseVoice 预设配置
+const sensevoicePresets = [
+  { id: "default", name: "极速", desc: "仅 SenseVoice", icon: "S" },
+  { id: "preset1", name: "补刀", desc: "SV + Whisper", icon: "W" },
+  { id: "preset2", name: "轻校", desc: "补刀 + 按需校对", icon: "L" },
+  { id: "preset3", name: "精校", desc: "补刀 + 全文精修", icon: "P" },
+  { id: "preset4", name: "全译", desc: "精校 + 全文翻译", icon: "T" },
+  { id: "preset5", name: "重译", desc: "精校 + 重点翻译", icon: "R" },
+];
+
+// 获取 SenseVoice 预设的具体配置
+function getSenseVoicePresetConfig(presetId) {
+  const configs = {
+    default: { enhancement: "off", proofread: "off", translate: "off" },
+    preset1: { enhancement: "smart_patch", proofread: "off", translate: "off" },
+    preset2: { enhancement: "smart_patch", proofread: "sparse", translate: "off" },
+    preset3: { enhancement: "smart_patch", proofread: "full", translate: "off" },
+    preset4: { enhancement: "smart_patch", proofread: "full", translate: "full" },
+    preset5: { enhancement: "smart_patch", proofread: "full", translate: "partial" },
+  };
+  return configs[presetId] || configs.default;
+}
 
 // 计算属性 - 使用 computed 包装确保响应式
 const tasks = computed(() => taskStore.tasks);
@@ -513,14 +578,24 @@ async function handleUpload() {
   const failCount = ref(0);
 
   try {
-    // 默认设置
+    // 构建转录设置
     const defaultSettings = {
+      engine: transcriptionEngine.value,
       model: "medium",
       compute_type: "float16",
       device: "cuda",
       batch_size: 16,
       word_timestamps: false,
     };
+
+    // 如果选择 SenseVoice 引擎，添加预设配置
+    if (transcriptionEngine.value === "sensevoice") {
+      const presetConfig = getSenseVoicePresetConfig(selectedPresetId.value);
+      defaultSettings.sensevoice = {
+        preset_id: selectedPresetId.value,
+        ...presetConfig,
+      };
+    }
 
     // 逐个上传文件
     for (const file of uploadFiles.value) {
@@ -1518,6 +1593,134 @@ async function handleExit() {
     .el-table__empty-text {
       color: var(--text-muted);
     }
+  }
+}
+
+// 转录设置区域
+.transcription-settings {
+  margin-top: 16px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+
+  .settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+
+    &:hover {
+      background: var(--bg-tertiary);
+    }
+
+    span {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    .el-icon {
+      color: var(--text-muted);
+      transition: transform var(--transition-fast);
+
+      &.is-expanded {
+        transform: rotate(180deg);
+      }
+    }
+  }
+
+  .settings-content {
+    padding: 14px;
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border-default);
+  }
+
+  .setting-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--text-secondary);
+      min-width: 70px;
+    }
+  }
+}
+
+// SenseVoice 预设网格
+.sensevoice-presets {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-default);
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+
+  &:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--border-hover);
+  }
+
+  &.active {
+    border-color: var(--primary);
+    background: rgba(88, 166, 255, 0.1);
+  }
+
+  .preset-icon {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+  }
+
+  &.active .preset-icon {
+    background: var(--primary);
+    color: white;
+  }
+
+  .preset-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-normal);
+    margin-bottom: 2px;
+  }
+
+  .preset-desc {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-align: center;
+    line-height: 1.3;
   }
 }
 </style>

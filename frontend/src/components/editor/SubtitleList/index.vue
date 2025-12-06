@@ -51,7 +51,10 @@
         :class="{
           'is-active': activeSubtitleId === subtitle.id,
           'is-current': currentSubtitleId === subtitle.id,
-          'has-error': hasError(index)
+          'has-error': hasError(index),
+          'warning-low-confidence': subtitle.warning_type === 'low_transcription',
+          'warning-high-perplexity': subtitle.warning_type === 'high_perplexity',
+          'warning-both': subtitle.warning_type === 'both'
         }"
         @click="onSubtitleClick(subtitle)"
       >
@@ -448,6 +451,38 @@ function formatDuration(seconds) {
 
   &.has-error {
     border-color: var(--danger);
+  }
+
+  // 置信度警告高亮样式
+  &.warning-low-confidence {
+    border-color: var(--warning);
+    background: rgba(210, 153, 34, 0.06);
+
+    .item-index {
+      background: var(--warning);
+      color: white;
+    }
+  }
+
+  &.warning-high-perplexity {
+    border-color: #e67700;
+    background: rgba(230, 119, 0, 0.06);
+
+    .item-index {
+      background: #e67700;
+      color: white;
+    }
+  }
+
+  &.warning-both {
+    border-color: var(--danger);
+    background: rgba(248, 81, 73, 0.08);
+    border-width: 2px;
+
+    .item-index {
+      background: var(--danger);
+      color: white;
+    }
   }
 }
 

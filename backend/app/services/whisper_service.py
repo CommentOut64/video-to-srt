@@ -11,7 +11,7 @@ import numpy as np
 import logging
 import gc
 
-from ..core import config
+from core import config
 
 logger = logging.getLogger(__name__)
 

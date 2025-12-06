@@ -553,6 +553,33 @@ function subscribeSSE() {
     onProxyComplete(data) {
       console.log('[EditorView] 收到SSE Proxy完成事件，完整数据:', data)
       videoStatus.handleProxyComplete(data)
+    },
+
+    // 新增：SenseVoice 流式字幕事件
+    onSubtitleUpdate(data) {
+      console.log('[EditorView] 收到字幕更新:', data)
+      // 处理流式字幕更新（SenseVoice/Whisper补刀/LLM校对翻译等）
+      handleStreamingSubtitle(data)
+    },
+
+    // 新增：BGM 检测事件
+    onBgmDetected(data) {
+      console.log('[EditorView] BGM 检测结果:', data)
+    },
+
+    // 新增：分离策略事件
+    onSeparationStrategy(data) {
+      console.log('[EditorView] 分离策略决策:', data)
+    },
+
+    // 新增：模型升级事件
+    onModelUpgrade(data) {
+      console.log('[EditorView] 模型升级:', data)
+    },
+
+    // 新增：熔断事件
+    onCircuitBreaker(data) {
+      console.log('[EditorView] 熔断触发:', data)
     }
   })
 }
@@ -564,6 +591,49 @@ function cleanupSSE() {
     sseUnsubscribe()
     sseUnsubscribe = null
   }
+}
+
+// 处理流式字幕更新
+function handleStreamingSubtitle(data) {
+  if (!data) return
+
+  // 解析字幕数据格式
+  const sentenceIndex = data.sentence_index ?? data.index
+  const text = data.text ?? data.content
+  const start = data.start_time ?? data.start
+  const end = data.end_time ?? data.end
+  const warningType = data.warning_type ?? 'none'
+  const source = data.source ?? data.event_type ?? 'unknown'
+
+  if (sentenceIndex === undefined || !text) {
+    console.warn('[EditorView] 无效的字幕数据:', data)
+    return
+  }
+
+  // 更新或添加字幕到 store
+  const existingIndex = projectStore.subtitles.findIndex(
+    s => s.sentenceIndex === sentenceIndex
+  )
+
+  const subtitleData = {
+    id: `sv_${sentenceIndex}`,
+    sentenceIndex,
+    text,
+    start: start ?? 0,
+    end: end ?? 0,
+    warning_type: warningType,
+    source
+  }
+
+  if (existingIndex >= 0) {
+    // 更新已有字幕
+    projectStore.updateSubtitle(existingIndex, subtitleData)
+  } else {
+    // 添加新字幕
+    projectStore.addSubtitle(subtitleData)
+  }
+
+  console.log(`[EditorView] 字幕 #${sentenceIndex} 已更新，来源: ${source}`)
 }
 
 // 刷新任务进度（用于SSE重连后的状态同步）

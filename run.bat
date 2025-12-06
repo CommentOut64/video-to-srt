@@ -1,73 +1,138 @@
 @echo off
-setlocal EnableDelayedExpansion
 chcp 65001 >nul 2>&1
 
-:: 设置窗口标题
-title Video to SRT GPU Dashboard
+title Video to SRT GPU
 
-echo [INFO] 正在启动 Video to SRT GPU...
+echo.
+echo ========================================
+echo   Video to SRT GPU - Starting...
+echo ========================================
+echo.
 
-:: 1. 获取项目根目录
 set "PROJECT_ROOT=%~dp0"
 set "PROJECT_ROOT=%PROJECT_ROOT:~0,-1%"
-
-:: 2. 设置 Python 路径
 set "VENV_ROOT=%PROJECT_ROOT%\.venv"
 set "PYTHON_EXEC=%VENV_ROOT%\Scripts\python.exe"
+set "TOOLS_DIR=%PROJECT_ROOT%\tools"
+set "BACKEND_DIR=%PROJECT_ROOT%\backend"
+set "FRONTEND_DIR=%PROJECT_ROOT%\frontend"
+set "REQ_FILE=%PROJECT_ROOT%\requirements.txt"
+set "MARKER_FILE=%PROJECT_ROOT%\.env_installed"
+set "PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple"
+set "KMP_DUPLICATE_LIB_OK=TRUE"
+set "HF_ENDPOINT=https://hf-mirror.com"
 
-:: 检查 Python 解释器是否存在
+echo [Config] Project: %PROJECT_ROOT%
+echo.
+
+echo [Step 1/6] Checking virtual environment...
+if not exist "%VENV_ROOT%" (
+    echo [INFO] Creating virtual environment...
+    python -m venv "%VENV_ROOT%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to create virtual environment
+        pause
+        exit /b 1
+    )
+    echo [OK] Virtual environment created
+) else (
+    echo [OK] Virtual environment exists
+)
+
 if not exist "%PYTHON_EXEC%" (
-    echo [ERROR] 未找到 Python 解释器: %PYTHON_EXEC%
-    echo [INFO] 请先执行: uv venv .venv
+    echo [ERROR] Python not found: %PYTHON_EXEC%
     pause
     exit /b 1
 )
+echo.
 
-:: 3. 设置 CUDA DLL 路径（混合环境关键！）
-:: PyTorch 的 CUDA 11 库
+echo [Step 2/6] Checking Python dependencies...
+if exist "%MARKER_FILE%" (
+    echo [INFO] Dependencies already installed, skipping...
+) else (
+    echo [INFO] Installing dependencies...
+    "%PYTHON_EXEC%" -m pip install --upgrade pip -i %PYPI_MIRROR% -q
+    "%PYTHON_EXEC%" -m pip install -r "%REQ_FILE%" -i %PYPI_MIRROR%
+    if errorlevel 1 (
+        echo [ERROR] Failed to install dependencies
+        pause
+        exit /b 1
+    )
+    echo installed > "%MARKER_FILE%"
+    echo [OK] Dependencies installed
+)
+echo.
+
+echo [Step 3/6] Checking frontend dependencies...
+set "SKIP_FRONTEND=0"
+where node >nul 2>&1
+if errorlevel 1 (
+    echo [WARNING] Node.js not found, frontend will not start
+    set "SKIP_FRONTEND=1"
+    goto skip_frontend
+)
+if not exist "%FRONTEND_DIR%\node_modules" (
+    echo [INFO] Installing frontend dependencies...
+    cd /d "%FRONTEND_DIR%"
+    call npm install
+    cd /d "%PROJECT_ROOT%"
+    echo [OK] Frontend dependencies installed
+) else (
+    echo [OK] Frontend dependencies exist
+)
+:skip_frontend
+echo.
+
+echo [Step 4/6] Checking FFmpeg...
+if exist "%TOOLS_DIR%\ffmpeg.exe" (
+    echo [OK] FFmpeg found
+) else (
+    echo [WARNING] FFmpeg not found in tools folder
+)
+echo.
+
+echo [Step 5/6] Configuring environment...
 set "TORCH_LIB=%VENV_ROOT%\Lib\site-packages\torch\lib"
-:: Faster-Whisper 需要的 CUDA 12 库
 set "NVIDIA_CUDNN=%VENV_ROOT%\Lib\site-packages\nvidia\cudnn\bin"
 set "NVIDIA_CUBLAS=%VENV_ROOT%\Lib\site-packages\nvidia\cublas\bin"
-
-:: 4. 设置工具路径（FFmpeg/FFprobe）
-set "TOOLS_DIR=%PROJECT_ROOT%\tools"
-
-:: 检查 FFmpeg 是否存在
-if not exist "%TOOLS_DIR%\ffmpeg.exe" (
-    echo [ERROR] 未找到 FFmpeg: %TOOLS_DIR%\ffmpeg.exe
-    echo [INFO] 请下载 ffmpeg.exe 并放入 tools 目录
-    pause
-    exit /b 1
-)
-
-:: 检查 FFprobe 是否存在
-if not exist "%TOOLS_DIR%\ffprobe.exe" (
-    echo [ERROR] 未找到 FFprobe: %TOOLS_DIR%\ffprobe.exe
-    echo [INFO] 请下载 ffprobe.exe 并放入 tools 目录
-    pause
-    exit /b 1
-)
-
-echo [INFO] FFmpeg 检查通过: %TOOLS_DIR%\ffmpeg.exe
-echo [INFO] FFprobe 检查通过: %TOOLS_DIR%\ffprobe.exe
-
-:: 5. 更新 PATH（CUDA库 + 工具目录 优先）
 set "PATH=%TORCH_LIB%;%NVIDIA_CUDNN%;%NVIDIA_CUBLAS%;%TOOLS_DIR%;%PATH%"
+echo [OK] Environment configured
+echo.
 
-echo [INFO] 环境变量已配置
-echo [INFO] - CUDA 11 (PyTorch): %TORCH_LIB%
-echo [INFO] - CUDA 12 (cuDNN): %NVIDIA_CUDNN%
-echo [INFO] - CUDA 12 (cuBLAS): %NVIDIA_CUBLAS%
-echo [INFO] - Tools: %TOOLS_DIR%
+echo [Step 6/6] Starting services...
+echo.
 
-:: 6. 启动 Python 启动器（bootloader.py 会处理依赖检查和服务启动）
-echo [INFO] 正在启动服务...
-"%PYTHON_EXEC%" "%PROJECT_ROOT%\bootloader.py"
+echo [Starting] Backend service on port 8000...
+cd /d "%BACKEND_DIR%"
+start "Backend" cmd /c "title Video2SRT Backend & set KMP_DUPLICATE_LIB_OK=TRUE & set PATH=%TORCH_LIB%;%NVIDIA_CUDNN%;%NVIDIA_CUBLAS%;%TOOLS_DIR%;%PATH% & "%PYTHON_EXEC%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 & pause"
 
-:: 检查 Python 脚本异常退出则暂停显示错误
-if %errorlevel% neq 0 (
-    echo.
-    echo [程序异常退出]
-    pause
+echo [Waiting] Backend initializing...
+timeout /t 5 /nobreak >nul
+
+if "%SKIP_FRONTEND%"=="0" (
+    echo [Starting] Frontend service on port 5173...
+    cd /d "%FRONTEND_DIR%"
+    start "Frontend" cmd /c "title Video2SRT Frontend & npm run dev & pause"
 )
+
+cd /d "%PROJECT_ROOT%"
+
+timeout /t 3 /nobreak >nul
+
+echo [Opening] Browser...
+start "" "http://localhost:5173"
+
+echo.
+echo ========================================
+echo   Services Started!
+echo ========================================
+echo.
+echo   Frontend: http://localhost:5173
+echo   Backend:  http://localhost:8000
+echo   API Docs: http://localhost:8000/docs
+echo.
+echo   Do not close this window!
+echo.
+echo ========================================
+
+pause

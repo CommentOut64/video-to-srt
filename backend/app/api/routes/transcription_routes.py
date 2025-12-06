@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import json
 
-from models.job_models import JobSettings, JobState, DemucsSettings
+from models.job_models import JobSettings, JobState, DemucsSettings, SenseVoiceSettings
 from services.transcription_service import TranscriptionService
 from services.file_service import FileManagementService
 from services.sse_service import get_sse_manager
@@ -29,14 +29,30 @@ class DemucsSettingsAPI(BaseModel):
     ratio_threshold: float = 0.2
 
 
+class SenseVoiceSettingsAPI(BaseModel):
+    """SenseVoice 配置请求模型"""
+    preset_id: str = "default"  # 预设ID: default/preset1-5/custom
+    enhancement: str = "off"  # off/smart_patch/deep_listen
+    proofread: str = "off"  # off/sparse/full
+    translate: str = "off"  # off/full/partial
+    target_language: str = "en"
+    confidence_threshold: float = 0.6
+    whisper_patch_threshold: float = 0.5
+
+
 class TranscribeSettings(BaseModel):
     """转录设置请求模型"""
+    # 转录引擎选择
+    engine: str = "whisper"  # whisper 或 sensevoice
+    # Whisper 相关设置
     model: str = "medium"
     compute_type: str = "float16"
     device: str = "cuda"
     batch_size: int = 16
     word_timestamps: bool = False
     demucs: Optional[DemucsSettingsAPI] = None  # Demucs配置（可选）
+    # SenseVoice 相关设置
+    sensevoice: Optional[SenseVoiceSettingsAPI] = None  # SenseVoice配置（可选）
 
 
 class UploadResponse(BaseModel):
@@ -295,6 +311,13 @@ def create_transcription_router(
             else:
                 # 移除 None 值，让 JobSettings 的 default_factory 生效
                 settings_dict.pop('demucs', None)
+
+            # 转换 SenseVoice 配置
+            if settings_dict.get('sensevoice'):
+                settings_dict['sensevoice'] = SenseVoiceSettings(**settings_dict['sensevoice'])
+            else:
+                # 移除 None 值，让 JobSettings 的 default_factory 生效
+                settings_dict.pop('sensevoice', None)
 
             job.settings = JobSettings(**settings_dict)
 
