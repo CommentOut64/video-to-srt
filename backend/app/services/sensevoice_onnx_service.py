@@ -1,30 +1,164 @@
 """
-SenseVoice ONNX 推理服务
+SenseVoice ONNX 推理服务（纯 ONNX Runtime 实现）
 
-基于 funasr-onnx 库实现的 SenseVoice 模型推理服务
-支持多语言语音识别、情感识别和事件检测
+核心特性：
+1. 移除 funasr-onnx 依赖，使用纯 ONNX Runtime
+2. 自研 CTC 解码器，从 Logits 提取字级时间戳
+3. 支持多语言语音识别、情感识别和事件检测
 
 模型来源：
 - ModelScope: https://www.modelscope.cn/models/iic/SenseVoiceSmall
 - HuggingFace: https://huggingface.co/FunAudioLLM/SenseVoiceSmall
 
-依赖安装：
-pip install funasr-onnx
+依赖：
+- onnxruntime / onnxruntime-gpu
+- numpy
+- librosa (用于音频预处理)
 """
 import os
 import logging
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Dict, Union
+from typing import List, Optional, Dict, Union, Tuple
 import threading
+import json
 
 logger = logging.getLogger(__name__)
 
 
-class SenseVoiceONNXService:
-    """SenseVoice ONNX 推理服务"""
+class CTCDecoder:
+    """
+    CTC 解码器（自研）
 
-    def __init__(self, config = None):
+    从 SenseVoice 的 Logits 输出中提取：
+    1. 文本序列
+    2. 字级时间戳
+    3. 置信度
+    """
+
+    def __init__(self, vocab: Dict[int, str], blank_id: int = 0):
+        """
+        初始化 CTC 解码器
+
+        Args:
+            vocab: 词汇表 {token_id: token_str}
+            blank_id: CTC blank token ID
+        """
+        self.vocab = vocab
+        self.blank_id = blank_id
+        self.logger = logging.getLogger(__name__)
+
+    def decode(
+        self,
+        logits: np.ndarray,
+        time_stride: float = 0.06
+    ) -> Tuple[str, List[Dict], float]:
+        """
+        CTC 解码（贪心算法 + 字级时间戳提取）
+
+        Args:
+            logits: 模型输出的 logits，形状 [time_steps, vocab_size]
+            time_stride: 时间步长（秒），SenseVoice 默认 60ms
+
+        Returns:
+            Tuple[str, List[Dict], float]:
+                - text: 解码后的文本
+                - word_timestamps: 字级时间戳列表
+                - confidence: 平均置信度
+        """
+        # 1. Softmax 转换为概率
+        probs = self._softmax(logits)
+
+        # 2. 贪心解码：选择每个时间步的最大概率 token
+        token_ids = np.argmax(probs, axis=-1)  # [time_steps]
+        token_probs = np.max(probs, axis=-1)   # [time_steps]
+
+        # 3. CTC 去重 + 提取字级时间戳
+        text_chars = []
+        word_timestamps = []
+        prev_token = self.blank_id
+        char_start_time = None
+        char_probs = []
+
+        for t, (token_id, prob) in enumerate(zip(token_ids, token_probs)):
+            current_time = t * time_stride
+
+            if token_id == self.blank_id:
+                # 遇到 blank，结束当前字符
+                if char_start_time is not None:
+                    # 保存字符和时间戳
+                    char_end_time = current_time
+                    avg_prob = np.mean(char_probs) if char_probs else prob
+
+                    word_timestamps.append({
+                        "word": self.vocab.get(prev_token, "<unk>"),
+                        "start": round(char_start_time, 3),
+                        "end": round(char_end_time, 3),
+                        "confidence": round(float(avg_prob), 3),
+                        "is_pseudo": False
+                    })
+
+                    char_start_time = None
+                    char_probs = []
+                prev_token = self.blank_id
+
+            elif token_id != prev_token:
+                # 新字符开始
+                if char_start_time is not None:
+                    # 保存上一个字符
+                    char_end_time = current_time
+                    avg_prob = np.mean(char_probs) if char_probs else token_probs[t-1]
+
+                    word_timestamps.append({
+                        "word": self.vocab.get(prev_token, "<unk>"),
+                        "start": round(char_start_time, 3),
+                        "end": round(char_end_time, 3),
+                        "confidence": round(float(avg_prob), 3),
+                        "is_pseudo": False
+                    })
+
+                # 开始新字符
+                char_start_time = current_time
+                char_probs = [prob]
+                prev_token = token_id
+
+            else:
+                # 同一字符持续
+                if char_start_time is not None:
+                    char_probs.append(prob)
+
+        # 处理最后一个字符
+        if char_start_time is not None and prev_token != self.blank_id:
+            char_end_time = len(token_ids) * time_stride
+            avg_prob = np.mean(char_probs) if char_probs else token_probs[-1]
+
+            word_timestamps.append({
+                "word": self.vocab.get(prev_token, "<unk>"),
+                "start": round(char_start_time, 3),
+                "end": round(char_end_time, 3),
+                "confidence": round(float(avg_prob), 3),
+                "is_pseudo": False
+            })
+
+        # 4. 拼接文本
+        text = "".join([wt["word"] for wt in word_timestamps])
+
+        # 5. 计算平均置信度
+        avg_confidence = np.mean([wt["confidence"] for wt in word_timestamps]) if word_timestamps else 0.0
+
+        return text, word_timestamps, float(avg_confidence)
+
+    @staticmethod
+    def _softmax(logits: np.ndarray) -> np.ndarray:
+        """Softmax 函数"""
+        exp_logits = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
+        return exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)
+
+
+class SenseVoiceONNXService:
+    """SenseVoice ONNX 推理服务（纯 ONNX Runtime 实现）"""
+
+    def __init__(self, config=None):
         """
         初始化 SenseVoice 服务
 
@@ -32,16 +166,21 @@ class SenseVoiceONNXService:
             config: SenseVoice 配置
         """
         if config is None:
-            from models.sensevoice_models import SenseVoiceConfig
+            from ..models.sensevoice_models import SenseVoiceConfig
             config = SenseVoiceConfig()
+
         self.config = config
-        self.model = None
+        self.session = None
+        self.decoder = None
         self.is_loaded = False
         self._lock = threading.Lock()
         self.logger = logging.getLogger(__name__)
 
-        # 模型路径（支持 ModelScope 和本地路径）
+        # 模型路径
         self.model_path = self._resolve_model_path()
+
+        # 时间步长（SenseVoice 有 6 倍下采样，输入 10ms/帧，输出 60ms/帧）
+        self.time_stride = 0.06  # 60ms
 
     def _resolve_model_path(self) -> str:
         """
@@ -50,7 +189,7 @@ class SenseVoiceONNXService:
         优先级：
         1. 本地路径（如果存在）
         2. ModelScope 缓存路径
-        3. 使用 ModelScope ID 自动下载
+        3. HuggingFace 缓存路径
 
         Returns:
             模型路径
@@ -69,16 +208,29 @@ class SenseVoiceONNXService:
             self.logger.info(f"使用 ModelScope 缓存: {modelscope_cache}")
             return str(modelscope_cache)
 
-        # 使用 ModelScope ID（会自动下载）
-        self.logger.info(f"将从 ModelScope 下载模型: {model_dir}")
-        return model_dir
+        # 检查 HuggingFace 缓存
+        hf_cache = home / ".cache" / "huggingface" / "hub" / f"models--{model_dir.replace('/', '--')}"
+        if hf_cache.exists():
+            self.logger.info(f"使用 HuggingFace 缓存: {hf_cache}")
+            return str(hf_cache)
+
+        # 使用项目内的 models 目录
+        from ..core.config import config as project_config
+        project_model_path = project_config.MODELS_DIR / "sensevoice"
+        if project_model_path.exists():
+            self.logger.info(f"使用项目模型: {project_model_path}")
+            return str(project_model_path)
+
+        raise FileNotFoundError(
+            f"未找到 SenseVoice 模型。请下载模型到以下任一位置：\n"
+            f"1. {modelscope_cache}\n"
+            f"2. {hf_cache}\n"
+            f"3. {project_model_path}\n"
+            f"或设置 model_dir 为本地路径"
+        )
 
     def load_model(self):
-        """
-        加载 SenseVoice ONNX 模型
-
-        使用 funasr-onnx 库加载模型
-        """
+        """加载 SenseVoice ONNX 模型"""
         with self._lock:
             if self.is_loaded:
                 self.logger.info("SenseVoice 模型已加载")
@@ -87,41 +239,255 @@ class SenseVoiceONNXService:
             try:
                 self.logger.info("开始加载 SenseVoice ONNX 模型...")
                 self.logger.info(f"模型路径: {self.model_path}")
-                self.logger.info(f"批处理大小: {self.config.batch_size}")
-                self.logger.info(f"量化: {self.config.quantize}")
 
-                # 导入 funasr-onnx
+                # 导入 ONNX Runtime
                 try:
-                    from funasr_onnx import SenseVoiceSmall
+                    import onnxruntime as ort
                 except ImportError as e:
                     raise ImportError(
-                        "funasr-onnx 未安装。请运行: pip install funasr-onnx\n"
-                        "详见: https://github.com/modelscope/FunASR"
+                        "onnxruntime 未安装。请运行: pip install onnxruntime-gpu 或 pip install onnxruntime"
                     ) from e
 
+                # 查找 ONNX 模型文件
+                model_file = self._find_onnx_model()
+                self.logger.info(f"ONNX 模型文件: {model_file}")
+
+                # 配置 ONNX Runtime
+                sess_options = ort.SessionOptions()
+                sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+                # 选择执行提供者
+                providers = self._get_execution_providers()
+                self.logger.info(f"执行提供者: {providers}")
+
                 # 加载模型
-                self.model = SenseVoiceSmall(
-                    self.model_path,
-                    batch_size=self.config.batch_size,
-                    quantize=self.config.quantize
+                self.session = ort.InferenceSession(
+                    model_file,
+                    sess_options=sess_options,
+                    providers=providers
                 )
+
+                # 加载词汇表
+                vocab = self._load_vocab()
+                self.decoder = CTCDecoder(vocab, blank_id=0)
 
                 self.is_loaded = True
                 self.logger.info("SenseVoice ONNX 模型加载成功")
+
+                # 打印模型信息
+                self._print_model_info()
 
             except Exception as e:
                 self.logger.error(f"加载 SenseVoice 模型失败: {e}", exc_info=True)
                 self.is_loaded = False
                 raise
 
+    def _find_onnx_model(self) -> str:
+        """查找 ONNX 模型文件"""
+        model_path = Path(self.model_path)
+
+        # 常见的模型文件名
+        candidates = [
+            "model.onnx",
+            "model_quant.onnx",
+            "sensevoice_small.onnx",
+            "sensevoice_small_int8.onnx"
+        ]
+
+        for candidate in candidates:
+            model_file = model_path / candidate
+            if model_file.exists():
+                return str(model_file)
+
+        # 搜索所有 .onnx 文件
+        onnx_files = list(model_path.glob("*.onnx"))
+        if onnx_files:
+            return str(onnx_files[0])
+
+        raise FileNotFoundError(f"在 {model_path} 中未找到 ONNX 模型文件")
+
+    def _load_vocab(self) -> Dict[int, str]:
+        """加载词汇表"""
+        model_path = Path(self.model_path)
+
+        # 查找词汇表文件
+        vocab_files = [
+            "tokens.json",
+            "vocab.json",
+            "tokens.txt"
+        ]
+
+        for vocab_file in vocab_files:
+            vocab_path = model_path / vocab_file
+            if vocab_path.exists():
+                self.logger.info(f"加载词汇表: {vocab_path}")
+
+                if vocab_file.endswith(".json"):
+                    with open(vocab_path, "r", encoding="utf-8") as f:
+                        vocab_data = json.load(f)
+                        # 转换为 {id: token} 格式
+                        if isinstance(vocab_data, dict):
+                            return {int(k): v for k, v in vocab_data.items()}
+                        elif isinstance(vocab_data, list):
+                            return {i: token for i, token in enumerate(vocab_data)}
+
+                elif vocab_file.endswith(".txt"):
+                    with open(vocab_path, "r", encoding="utf-8") as f:
+                        tokens = [line.strip() for line in f]
+                        return {i: token for i, token in enumerate(tokens)}
+
+        self.logger.warning("未找到词汇表文件，使用默认词汇表")
+        # 返回空词汇表（解码时会使用 <unk>）
+        return {}
+
+    def _get_execution_providers(self) -> List[str]:
+        """获取执行提供者"""
+        import onnxruntime as ort
+
+        available_providers = ort.get_available_providers()
+        self.logger.info(f"可用的执行提供者: {available_providers}")
+
+        if self.config.device == "cuda" and "CUDAExecutionProvider" in available_providers:
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            return ["CPUExecutionProvider"]
+
+    def _print_model_info(self):
+        """打印模型信息"""
+        if self.session is None:
+            return
+
+        self.logger.info("=== 模型信息 ===")
+        self.logger.info(f"输入: {[inp.name for inp in self.session.get_inputs()]}")
+        self.logger.info(f"输出: {[out.name for out in self.session.get_outputs()]}")
+
     def unload_model(self):
         """卸载模型，释放内存"""
         with self._lock:
-            if self.model is not None:
-                del self.model
-                self.model = None
+            if self.session is not None:
+                del self.session
+                self.session = None
+                self.decoder = None
                 self.is_loaded = False
                 self.logger.info("SenseVoice 模型已卸载")
+
+    def transcribe_audio_array(
+        self,
+        audio_array: np.ndarray,
+        sample_rate: int = 16000,
+        language: str = None,
+        use_itn: bool = None
+    ) -> Dict:
+        """
+        转录音频数组（内存中的音频数据）
+
+        Args:
+            audio_array: 音频数组 (numpy array)，单声道
+            sample_rate: 采样率（必须是 16000）
+            language: 语言代码
+            use_itn: 是否使用逆文本正则化
+
+        Returns:
+            转录结果字典，包含：
+            - text: 原始文本（带标签）
+            - text_clean: 清洗后的文本
+            - words: 字级时间戳列表
+            - confidence: 平均置信度
+            - language: 检测到的语言
+            - emotion: 情感标签
+            - event: 事件标签
+        """
+        if not self.is_loaded:
+            raise RuntimeError("模型未加载，请先调用 load_model()")
+
+        if sample_rate != 16000:
+            raise ValueError(f"SenseVoice 要求采样率为 16000 Hz，当前为 {sample_rate} Hz")
+
+        try:
+            # 1. 音频预处理
+            audio_features = self._preprocess_audio(audio_array, sample_rate)
+
+            # 2. 模型推理
+            logits = self._run_inference(audio_features)
+
+            # 3. CTC 解码
+            text, word_timestamps, confidence = self.decoder.decode(logits, self.time_stride)
+
+            # 4. 提取标签信息
+            from ..services.text_normalizer import get_text_normalizer
+            normalizer = get_text_normalizer()
+            process_result = normalizer.process(text, extract_info=True)
+
+            # 5. 构建结果
+            result = {
+                "text": text,
+                "text_clean": process_result["text_clean"],
+                "words": word_timestamps,
+                "confidence": confidence,
+                "language": process_result["tags"]["language"] if process_result["tags"] else None,
+                "emotion": process_result["tags"]["emotion"] if process_result["tags"] else None,
+                "event": process_result["tags"]["event"] if process_result["tags"] else None
+            }
+
+            self.logger.debug(f"转录完成: {len(word_timestamps)} 个字符, 置信度 {confidence:.3f}")
+            return result
+
+        except Exception as e:
+            self.logger.error(f"转录失败: {e}", exc_info=True)
+            raise
+
+    def _preprocess_audio(self, audio_array: np.ndarray, sample_rate: int) -> np.ndarray:
+        """
+        音频预处理
+
+        Args:
+            audio_array: 音频数组
+            sample_rate: 采样率
+
+        Returns:
+            预处理后的特征
+        """
+        # 确保单声道
+        if len(audio_array.shape) > 1:
+            audio_array = np.mean(audio_array, axis=1)
+
+        # 归一化
+        if audio_array.dtype != np.float32:
+            audio_array = audio_array.astype(np.float32)
+
+        # 确保范围在 [-1, 1]
+        max_val = np.abs(audio_array).max()
+        if max_val > 1.0:
+            audio_array = audio_array / max_val
+
+        # SenseVoice 输入格式：[batch, samples]
+        audio_features = audio_array[np.newaxis, :]  # [1, samples]
+
+        return audio_features
+
+    def _run_inference(self, audio_features: np.ndarray) -> np.ndarray:
+        """
+        运行模型推理
+
+        Args:
+            audio_features: 音频特征 [batch, samples]
+
+        Returns:
+            logits: [time_steps, vocab_size]
+        """
+        # 获取输入名称
+        input_name = self.session.get_inputs()[0].name
+
+        # 运行推理
+        outputs = self.session.run(None, {input_name: audio_features})
+
+        # 提取 logits（假设第一个输出是 logits）
+        logits = outputs[0]  # [batch, time_steps, vocab_size]
+
+        # 移除 batch 维度
+        logits = logits[0]  # [time_steps, vocab_size]
+
+        return logits
 
     def transcribe(
         self,
@@ -135,26 +501,14 @@ class SenseVoiceONNXService:
 
         Args:
             audio_path: 音频文件路径或路径列表
-            language: 语言代码 (auto, zh, en, yue, ja, ko, nospeech)
+            language: 语言代码
             use_itn: 是否使用逆文本正则化
             ban_emo_unk: 是否禁用未知情感标签
 
         Returns:
-            转录结果列表，每个结果包含：
-            - text: 转录文本（带特殊标签）
-            - text_clean: 清洗后的文本
-            - language: 检测到的语言
-            - emotion: 情感标签
-            - event: 事件标签
-            - confidence: 置信度（如果可用）
+            转录结果列表
         """
-        if not self.is_loaded:
-            raise RuntimeError("模型未加载，请先调用 load_model()")
-
-        # 使用配置的默认值
-        language = language or self.config.language
-        use_itn = use_itn if use_itn is not None else self.config.use_itn
-        ban_emo_unk = ban_emo_unk if ban_emo_unk is not None else self.config.ban_emo_unk
+        import librosa
 
         # 确保输入为列表
         if isinstance(audio_path, str):
@@ -162,111 +516,33 @@ class SenseVoiceONNXService:
         else:
             audio_paths = audio_path
 
-        try:
-            self.logger.info(f"开始转录 {len(audio_paths)} 个音频文件")
-            self.logger.debug(f"语言: {language}, ITN: {use_itn}")
-
-            # 调用模型推理
-            results = self.model(
-                audio_paths,
-                language=language,
-                use_itn=use_itn,
-                ban_emo_unk=ban_emo_unk
-            )
-
-            # 处理结果
-            processed_results = []
-            for i, raw_text in enumerate(results):
-                # 提取标签信息
-                from ..services.text_normalizer import get_text_normalizer
-                normalizer = get_text_normalizer()
-
-                # 提取标签和清洗文本
-                process_result = normalizer.process(raw_text, extract_info=True)
-
-                result = {
-                    "text": raw_text,
-                    "text_clean": process_result["text_clean"],
-                    "language": process_result["tags"]["language"] if process_result["tags"] else None,
-                    "emotion": process_result["tags"]["emotion"] if process_result["tags"] else None,
-                    "event": process_result["tags"]["event"] if process_result["tags"] else None,
-                    "confidence": 1.0,  # funasr-onnx 不提供置信度，默认为1.0
-                    "audio_path": audio_paths[i]
-                }
-
-                processed_results.append(result)
-
-            self.logger.info(f"转录完成，共 {len(processed_results)} 个结果")
-            return processed_results
-
-        except Exception as e:
-            self.logger.error(f"转录失败: {e}", exc_info=True)
-            raise
-
-    def transcribe_audio_array(
-        self,
-        audio_array: np.ndarray,
-        sample_rate: int = 16000,
-        language: str = None,
-        use_itn: bool = None
-    ) -> Dict:
-        """
-        转录音频数组（内存中的音频数据）
-
-        Args:
-            audio_array: 音频数组 (numpy array)
-            sample_rate: 采样率
-            language: 语言代码
-            use_itn: 是否使用逆文本正则化
-
-        Returns:
-            转录结果字典
-
-        Note:
-            funasr-onnx 主要支持文件路径输入
-            如需处理音频数组，需要先保存为临时文件
-        """
-        import tempfile
-        import soundfile as sf
-
-        # 创建临时文件
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-            tmp_path = tmp_file.name
-
-        try:
-            # 保存音频到临时文件
-            sf.write(tmp_path, audio_array, sample_rate)
+        results = []
+        for path in audio_paths:
+            # 加载音频
+            audio_array, sr = librosa.load(path, sr=16000, mono=True)
 
             # 转录
-            results = self.transcribe(tmp_path, language=language, use_itn=use_itn)
+            result = self.transcribe_audio_array(audio_array, sr, language, use_itn)
+            result["audio_path"] = path
+            results.append(result)
 
-            return results[0] if results else {}
-
-        finally:
-            # 清理临时文件
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        return results
 
     def get_model_info(self) -> Dict:
-        """
-        获取模型信息
-
-        Returns:
-            模型信息字典
-        """
+        """获取模型信息"""
         return {
             "model_name": "SenseVoice-Small",
             "model_path": self.model_path,
             "is_loaded": self.is_loaded,
-            "batch_size": self.config.batch_size,
-            "quantize": self.config.quantize,
             "device": self.config.device,
+            "time_stride": self.time_stride,
             "supported_languages": ["zh", "en", "yue", "ja", "ko"],
             "features": [
                 "多语言识别",
                 "情感识别",
                 "事件检测",
-                "逆文本正则化"
+                "字级时间戳",
+                "CTC 解码"
             ]
         }
 
@@ -277,7 +553,7 @@ _sensevoice_service_instance: Optional[SenseVoiceONNXService] = None
 _instance_lock = threading.Lock()
 
 
-def get_sensevoice_service(config = None) -> SenseVoiceONNXService:
+def get_sensevoice_service(config=None) -> SenseVoiceONNXService:
     """
     获取 SenseVoice 服务单例
 

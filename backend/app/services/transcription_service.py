@@ -3675,6 +3675,745 @@ class TranscriptionService:
             _model_cache.clear()
             self.logger.info("Whisper模型缓存已清空")
 
+    # ==========================================
+    # SenseVoice 集成方法（Phase 3）
+    # ==========================================
+
+    def _extract_audio_with_array(
+        self,
+        input_file: str,
+        job: 'JobState',
+        target_sr: int = 16000
+    ) -> Tuple[np.ndarray, int]:
+        """
+        提取音频并返回 numpy 数组
+
+        Args:
+            input_file: 输入视频/音频文件路径
+            job: 任务状态对象
+            target_sr: 目标采样率（默认16000Hz，SenseVoice标准）
+
+        Returns:
+            Tuple[np.ndarray, int]: (音频数组, 采样率)
+
+        Raises:
+            RuntimeError: 提取失败时抛出
+        """
+        import tempfile
+        import librosa
+
+        self.logger.info(f"开始提取音频到内存: {input_file}")
+
+        # 创建临时WAV文件
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+
+        try:
+            # 使用FFmpeg提取音频
+            cmd = [
+                'ffmpeg', '-y', '-i', input_file,
+                '-vn',  # 无视频
+                '-acodec', 'pcm_s16le',  # 16位PCM
+                '-ar', str(target_sr),  # 采样率
+                '-ac', '1',  # 单声道
+                tmp_path
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"FFmpeg提取失败: {result.stderr}")
+
+            # 加载音频到内存
+            audio_array, sr = librosa.load(tmp_path, sr=target_sr, mono=True)
+
+            self.logger.info(f"音频提取完成: {len(audio_array)} samples, {sr}Hz")
+            return audio_array, sr
+
+        finally:
+            # 清理临时文件
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def _sensevoice_transcribe(
+        self,
+        audio_array: np.ndarray,
+        job: 'JobState',
+        sample_rate: int = 16000
+    ) -> 'SenseVoiceResult':
+        """
+        调用 SenseVoice 服务进行转录（返回带真实字级时间戳的结果）
+
+        Args:
+            audio_array: 音频数组
+            job: 任务状态对象
+            sample_rate: 采样率
+
+        Returns:
+            SenseVoiceResult: 转录结果，包含:
+                - text: 原始文本（带标签）
+                - text_clean: 清洗后文本
+                - words: 字级时间戳列表（真实时间戳，非伪对齐）
+                - confidence: 平均置信度
+                - language: 检测到的语言
+                - emotion: 情感标签
+                - event: 事件标签
+        """
+        from .sensevoice_onnx_service import get_sensevoice_service
+        from ..models.sensevoice_models import SenseVoiceResult, WordTimestamp
+
+        self.logger.info("调用 SenseVoice 转录服务")
+
+        try:
+            service = get_sensevoice_service()
+
+            # 确保模型已加载
+            if not service.is_loaded:
+                self.logger.info("加载 SenseVoice 模型...")
+                service.load_model()
+
+            # 调用转录（返回字典）
+            result_dict = service.transcribe_audio_array(
+                audio_array=audio_array,
+                sample_rate=sample_rate,
+                language=job.settings.sensevoice.preset_id if hasattr(job.settings, 'sensevoice') else "auto"
+            )
+
+            # 转换为 SenseVoiceResult 对象
+            words = [
+                WordTimestamp(**w) if isinstance(w, dict) else w
+                for w in result_dict.get('words', [])
+            ]
+
+            result = SenseVoiceResult(
+                text=result_dict.get('text', ''),
+                text_clean=result_dict.get('text_clean', ''),
+                confidence=result_dict.get('confidence', 1.0),
+                words=words,
+                start=0.0,  # Chunk 级别的起始时间，由调用者设置
+                end=len(audio_array) / sample_rate,
+                language=result_dict.get('language'),
+                emotion=result_dict.get('emotion'),
+                event=result_dict.get('event'),
+                raw_result=result_dict
+            )
+
+            self.logger.info(f"SenseVoice 转录完成: {len(result.text_clean)} 字符, {len(words)} 个字")
+            return result
+
+        except Exception as e:
+            self.logger.error(f"SenseVoice 转录失败: {e}")
+            raise
+
+    def _split_sentences(
+        self,
+        sv_result: 'SenseVoiceResult',
+        chunk_start_time: float = 0.0
+    ) -> List['SentenceSegment']:
+        """
+        将 SenseVoice 结果切分为句子（基于真实字级时间戳）
+
+        Args:
+            sv_result: SenseVoice 转录结果（包含真实字级时间戳）
+            chunk_start_time: Chunk 在完整音频中的起始时间（用于时间偏移）
+
+        Returns:
+            List[SentenceSegment]: 句子列表
+        """
+        from ..models.sensevoice_models import SentenceSegment, TextSource
+        from .sentence_splitter import SentenceSplitter, SplitConfig
+
+        self.logger.info(f"开始句子切分: {len(sv_result.words)} 个字")
+
+        if not sv_result.words:
+            return []
+
+        # 使用分句器进行切分（基于真实时间戳）
+        splitter = SentenceSplitter(SplitConfig())
+        sentences = splitter.split(sv_result.words, sv_result.text_clean)
+
+        # 调整时间偏移（将 Chunk 内的相对时间转换为绝对时间）
+        for sentence in sentences:
+            sentence.start += chunk_start_time
+            sentence.end += chunk_start_time
+            sentence.source = TextSource.SENSEVOICE
+            sentence.confidence = sv_result.confidence
+
+            # 调整字级时间戳的偏移
+            for word in sentence.words:
+                word.start += chunk_start_time
+                word.end += chunk_start_time
+
+        self.logger.info(f"句子切分完成: {len(sentences)} 句")
+        return sentences
+
+    def _split_text_by_punctuation(self, text: str) -> List[str]:
+        """
+        基于标点符号切分文本
+
+        Args:
+            text: 原始文本
+
+        Returns:
+            List[str]: 句子列表
+        """
+        import re
+
+        # 句末标点
+        sentence_end_pattern = r'([。？！.?!])'
+
+        # 使用正则切分，保留标点
+        parts = re.split(sentence_end_pattern, text)
+
+        # 合并标点到前一个句子
+        sentences = []
+        i = 0
+        while i < len(parts):
+            if i + 1 < len(parts) and re.match(sentence_end_pattern, parts[i + 1]):
+                sentences.append(parts[i] + parts[i + 1])
+                i += 2
+            else:
+                if parts[i].strip():
+                    sentences.append(parts[i])
+                i += 1
+
+        return [s.strip() for s in sentences if s.strip()]
+
+    def _generate_pseudo_word_timestamps(
+        self,
+        text: str,
+        start: float,
+        end: float,
+        confidence: float = 1.0
+    ) -> List['WordTimestamp']:
+        """
+        生成伪字级时间戳（均匀分布）
+
+        Args:
+            text: 句子文本
+            start: 句子开始时间
+            end: 句子结束时间
+            confidence: 置信度
+
+        Returns:
+            List[WordTimestamp]: 字级时间戳列表
+        """
+        from ..models.sensevoice_models import WordTimestamp
+
+        if not text:
+            return []
+
+        duration = end - start
+        char_duration = duration / len(text)
+
+        words = []
+        for i, char in enumerate(text):
+            word_start = start + i * char_duration
+            word_end = start + (i + 1) * char_duration
+
+            words.append(WordTimestamp(
+                word=char,
+                start=word_start,
+                end=word_end,
+                confidence=confidence,
+                is_pseudo=True  # 标记为伪对齐
+            ))
+
+        return words
+
+    def _generate_subtitle_from_sentences(
+        self,
+        sentences: List['SentenceSegment'],
+        output_path: str,
+        include_translation: bool = False
+    ) -> str:
+        """
+        从句子列表生成 SRT 字幕文件
+
+        Args:
+            sentences: 句子列表
+            output_path: 输出文件路径
+            include_translation: 是否包含翻译（双语字幕）
+
+        Returns:
+            str: 生成的SRT文件路径
+        """
+        self.logger.info(f"生成SRT字幕: {len(sentences)} 句 -> {output_path}")
+
+        lines = []
+        for idx, sentence in enumerate(sentences, 1):
+            # 序号
+            lines.append(str(idx))
+
+            # 时间戳
+            start_ts = self._format_ts(sentence.start)
+            end_ts = self._format_ts(sentence.end)
+            lines.append(f"{start_ts} --> {end_ts}")
+
+            # 字幕文本
+            if include_translation and sentence.translation:
+                # 双语字幕：原文 + 翻译
+                lines.append(sentence.text)
+                lines.append(sentence.translation)
+            else:
+                lines.append(sentence.text)
+
+            # 空行分隔
+            lines.append("")
+
+        # 写入文件
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+
+        self.logger.info(f"SRT字幕生成完成: {output_path}")
+        return output_path
+
+    def _memory_vad_split(
+        self,
+        audio_array: np.ndarray,
+        sr: int = 16000,
+        job: 'JobState' = None
+    ) -> List[Dict]:
+        """
+        VAD 内存切分（基于 Silero VAD）
+
+        Args:
+            audio_array: 音频数组
+            sr: 采样率
+            job: 任务状态对象
+
+        Returns:
+            List[Dict]: VAD 切分结果，格式：
+                [{"index": 0, "start": 0.0, "end": 15.5, "mode": "memory"}, ...]
+        """
+        self.logger.info("开始 VAD 内存切分...")
+
+        # 调用现有的 _vad_silero 方法
+        vad_segments = self._vad_silero(audio_array, sr)
+
+        # 转换为标准格式
+        result = []
+        for i, seg in enumerate(vad_segments):
+            result.append({
+                "index": i,
+                "start": seg["start"],
+                "end": seg["end"],
+                "mode": "memory"
+            })
+
+        self.logger.info(f"VAD 切分完成: {len(result)} 个片段")
+        return result
+
+    def _init_chunk_states(
+        self,
+        vad_segments: List[dict],
+        audio_array: np.ndarray,
+        sr: int = 16000
+    ) -> List['ChunkProcessState']:
+        """
+        初始化所有 Chunk 的处理状态
+
+        关键：保存原始音频引用，用于熔断回溯
+
+        Args:
+            vad_segments: VAD 切分结果
+            audio_array: 完整音频数组
+            sr: 采样率
+
+        Returns:
+            List[ChunkProcessState]: Chunk 状态列表
+        """
+        from ..models.circuit_breaker_models import ChunkProcessState, SeparationLevel
+
+        self.logger.info(f"初始化 {len(vad_segments)} 个 Chunk 状态...")
+
+        states = []
+        for seg in vad_segments:
+            start_sample = int(seg['start'] * sr)
+            end_sample = int(seg['end'] * sr)
+            chunk_audio = audio_array[start_sample:end_sample]
+
+            state = ChunkProcessState(
+                chunk_index=seg['index'],
+                start_time=seg['start'],
+                end_time=seg['end'],
+                original_audio=chunk_audio.copy(),  # 关键：保存原始音频副本
+                current_audio=chunk_audio,           # 当前使用的音频（可能被分离后替换）
+                sample_rate=sr,
+                separation_level=SeparationLevel.NONE
+            )
+            states.append(state)
+
+        self.logger.info(f"Chunk 状态初始化完成")
+        return states
+
+    async def _transcribe_chunk_with_fusing(
+        self,
+        chunk_state: 'ChunkProcessState',
+        job: 'JobState',
+        subtitle_manager: 'StreamingSubtitleManager',
+        demucs_service
+    ) -> List['SentenceSegment']:
+        """
+        单个 Chunk 的转录流程（含熔断回溯）
+
+        流程：
+        1. 使用 current_audio 进行 SenseVoice 转录
+        2. 评估置信度和事件标签
+        3. 熔断决策
+        4. 如需熔断：回溯到 original_audio，升级分离，重新转录
+        5. 止损点：max_retry=1
+
+        Args:
+            chunk_state: Chunk 处理状态
+            job: 任务状态对象
+            subtitle_manager: 流式字幕管理器
+            demucs_service: Demucs 服务实例
+
+        Returns:
+            List[SentenceSegment]: 句子列表
+        """
+        from .fuse_breaker import get_fuse_breaker, execute_fuse_upgrade, FuseAction
+
+        fuse_breaker = get_fuse_breaker()
+
+        while True:
+            # 1. SenseVoice 转录
+            sv_result = self._sensevoice_transcribe(chunk_state.current_audio, job, chunk_state.sample_rate)
+
+            # 2. 分句
+            sentences = self._split_sentences(sv_result, chunk_state.start_time)
+
+            # 3. 计算置信度和事件标签
+            avg_confidence = sum(s.confidence for s in sentences) / len(sentences) if sentences else 0.0
+            event_tag = sv_result.event  # SenseVoice 检测到的事件（BGM/Noise等）
+
+            # 4. 熔断决策
+            decision = fuse_breaker.should_fuse(
+                chunk_state=chunk_state,
+                confidence=avg_confidence,
+                event_tag=event_tag
+            )
+
+            self.logger.debug(
+                f"Chunk {chunk_state.chunk_index} 熔断决策: {decision.action.value}, "
+                f"置信度={avg_confidence:.2f}, 事件={event_tag}"
+            )
+
+            # 5. 处理决策
+            if decision.action == FuseAction.ACCEPT:
+                # 接受结果，推送 SSE，返回
+                for sent in sentences:
+                    subtitle_manager.add_sentence(sent)
+                return sentences
+
+            elif decision.action == FuseAction.UPGRADE_SEPARATION:
+                # 熔断回溯：使用原始音频重新分离
+                self.logger.info(
+                    f"Chunk {chunk_state.chunk_index} 触发熔断，"
+                    f"升级分离: {chunk_state.separation_level.value} → {decision.next_separation_level.value}"
+                )
+
+                chunk_state = execute_fuse_upgrade(
+                    chunk_state=chunk_state,
+                    next_level=decision.next_separation_level,
+                    demucs_service=demucs_service
+                )
+
+                # 继续循环，使用升级后的音频重新转录
+                continue
+
+            else:
+                # 未知动作，接受当前结果
+                for sent in sentences:
+                    subtitle_manager.add_sentence(sent)
+                return sentences
+
+    async def _whisper_text_patch(
+        self,
+        sentence: 'SentenceSegment',
+        sentence_index: int,
+        audio_array: np.ndarray,
+        job: 'JobState',
+        subtitle_manager: 'StreamingSubtitleManager'
+    ) -> 'SentenceSegment':
+        """
+        Whisper 补刀（时空解耦版：仅取文本）
+
+        核心原则：
+        - SenseVoice 确定的时间轴（start/end）不可变
+        - 仅使用 Whisper 的文本结果
+        - 新文本使用伪对齐生成字级时间戳
+
+        Args:
+            sentence: 原始句子（由 SenseVoice 生成）
+            sentence_index: 句子索引
+            audio_array: 完整音频数组
+            job: 任务状态
+            subtitle_manager: 流式字幕管理器
+
+        Returns:
+            SentenceSegment: 更新后的句子
+        """
+        from .whisper_service import get_whisper_service
+        from ..models.sensevoice_models import TextSource
+
+        whisper_service = get_whisper_service()
+
+        # 提取对应时间段的音频（使用 SenseVoice 的时间窗口）
+        sr = 16000
+        start_sample = int(sentence.start * sr)
+        end_sample = int(sentence.end * sr)
+        audio_segment = audio_array[start_sample:end_sample]
+
+        # 获取上下文提示
+        context = subtitle_manager.get_context_window(sentence_index)
+
+        # Whisper 转录（仅取文本，弃用时间戳）
+        result = whisper_service.transcribe(
+            audio=audio_segment,
+            initial_prompt=context,
+            language=job.settings.get('language', 'auto'),
+            word_timestamps=False  # 不需要字级时间戳，使用伪对齐
+        )
+
+        whisper_text = result.get('text', '').strip()
+
+        if not whisper_text:
+            self.logger.warning(f"Whisper 补刀返回空文本，保留原结果")
+            return sentence
+
+        # 保存 Whisper 备选文本
+        sentence.whisper_alternative = whisper_text
+
+        # 使用伪对齐更新句子
+        subtitle_manager.update_sentence(
+            index=sentence_index,
+            new_text=whisper_text,
+            source=TextSource.WHISPER_PATCH,
+            confidence=self._estimate_whisper_confidence(result)
+        )
+
+        return subtitle_manager.sentences[sentence_index]
+
+    def _estimate_whisper_confidence(self, result: dict) -> float:
+        """估算 Whisper 结果置信度"""
+        segments = result.get('segments', [])
+        if not segments:
+            return 0.7
+
+        # 基于 avg_logprob 和 no_speech_prob 计算
+        total_logprob = sum(s.get('avg_logprob', -0.5) for s in segments)
+        avg_logprob = total_logprob / len(segments)
+
+        avg_no_speech = sum(s.get('no_speech_prob', 0.1) for s in segments) / len(segments)
+
+        # 转换为 0-1 置信度
+        confidence = min(1.0, max(0.0, 1.0 + avg_logprob))  # logprob 越接近 0 越好
+        confidence *= (1.0 - avg_no_speech)  # no_speech 越低越好
+
+        return round(confidence, 3)
+
+    async def _post_process_enhancement(
+        self,
+        sentences: List['SentenceSegment'],
+        audio_array: np.ndarray,
+        job: 'JobState',
+        subtitle_manager: 'StreamingSubtitleManager',
+        solution_config: 'SolutionConfig'
+    ) -> List['SentenceSegment']:
+        """
+        后处理增强层（所有 Chunk 转录完成后执行）
+
+        根据用户配置执行：
+        1. 低置信度句子 → Whisper 补刀（仅文本 + 伪对齐）
+        2. [可选] LLM 校对
+        3. [可选] LLM 翻译
+
+        注意：这不是熔断，熔断在转录阶段已经处理完成
+
+        Args:
+            sentences: 所有句子列表
+            audio_array: 完整音频数组
+            job: 任务状态
+            subtitle_manager: 流式字幕管理器
+            solution_config: 方案配置
+
+        Returns:
+            List[SentenceSegment]: 增强后的句子列表
+        """
+        from .progress_tracker import get_progress_tracker, ProcessPhase
+        from .solution_matrix import EnhancementMode, ProofreadMode, TranslateMode
+        from ..core.thresholds import needs_whisper_patch
+
+        progress_tracker = get_progress_tracker(job.job_id, solution_config.preset_id)
+
+        # 1. 收集需要 Whisper 补刀的句子（根据用户配置）
+        patch_queue = []
+        if solution_config.enhancement != EnhancementMode.OFF:
+            for i, sentence in enumerate(sentences):
+                if needs_whisper_patch(sentence.confidence):
+                    patch_queue.append((i, sentence))
+
+        # 2. Whisper 补刀阶段
+        if patch_queue:
+            progress_tracker.start_phase(ProcessPhase.WHISPER_PATCH, len(patch_queue), "Whisper 补刀中...")
+
+            for idx, (sent_idx, sentence) in enumerate(patch_queue):
+                await self._whisper_text_patch(
+                    sentence, sent_idx, audio_array, job, subtitle_manager
+                )
+                progress_tracker.update_phase(ProcessPhase.WHISPER_PATCH, increment=1)
+
+            progress_tracker.complete_phase(ProcessPhase.WHISPER_PATCH)
+
+        # 3. [可选] LLM 校对
+        if solution_config.proofread != ProofreadMode.OFF:
+            # TODO: 实现 LLM 校对
+            self.logger.info("LLM 校对功能待实现")
+
+        # 4. [可选] LLM 翻译
+        if solution_config.translate != TranslateMode.OFF:
+            # TODO: 实现 LLM 翻译
+            self.logger.info("LLM 翻译功能待实现")
+
+        return subtitle_manager.get_all_sentences()
+
+    async def _process_video_sensevoice(self, job: 'JobState'):
+        """
+        SenseVoice 主处理流程（v2.1 概念澄清版）
+
+        流程说明：
+        1-4: 准备阶段（音频提取、VAD、频谱分诊、按需分离）
+        5: 转录阶段（逐Chunk转录 + 熔断回溯）
+        6-8: 后处理增强阶段（Whisper补刀、LLM校对/翻译）
+        9: 输出阶段（生成字幕）
+        """
+        from .streaming_subtitle import get_streaming_subtitle_manager, remove_streaming_subtitle_manager
+        from .progress_tracker import get_progress_tracker, remove_progress_tracker, ProcessPhase
+        from .solution_matrix import SolutionConfig, TranslateMode
+        from .audio_spectrum_classifier import get_spectrum_classifier
+        from .demucs_service import get_demucs_service
+        from .sse_service import get_sse_manager
+        from ..models.circuit_breaker_models import SeparationLevel
+        from pathlib import Path
+
+        def push_signal_event(sse_manager, job_id: str, signal_code: str, message: str = ""):
+            """推送信号事件"""
+            sse_manager.broadcast_sync(
+                channel=f"job_{job_id}",
+                event_type="signal",
+                data={"code": signal_code, "message": message}
+            )
+
+        # 获取方案配置
+        preset_id = getattr(job.settings.sensevoice, 'preset_id', 'default')
+        solution_config = SolutionConfig.from_preset(preset_id)
+
+        # 初始化管理器
+        subtitle_manager = get_streaming_subtitle_manager(job.job_id)
+        progress_tracker = get_progress_tracker(job.job_id, preset_id)
+
+        try:
+            # 1. 音频提取
+            progress_tracker.start_phase(ProcessPhase.EXTRACT, 1, "提取音频...")
+            audio_array, sr = self._extract_audio_with_array(job.input_file, job, target_sr=16000)
+            progress_tracker.complete_phase(ProcessPhase.EXTRACT)
+
+            # 2. VAD 物理切分
+            progress_tracker.start_phase(ProcessPhase.VAD, 1, "VAD 切分...")
+            vad_segments = self._memory_vad_split(audio_array, sr, job)
+            progress_tracker.complete_phase(ProcessPhase.VAD)
+
+            # 3. 频谱分诊（Chunk级别）
+            progress_tracker.start_phase(ProcessPhase.BGM_DETECT, 1, "频谱分诊...")
+            spectrum_classifier = get_spectrum_classifier()
+            diagnoses = spectrum_classifier.diagnose_chunks(
+                [(audio_array[int(s['start']*sr):int(s['end']*sr)], s['start'], s['end'])
+                 for s in vad_segments],
+                sr=sr
+            )
+            progress_tracker.complete_phase(ProcessPhase.BGM_DETECT)
+
+            # 4. 初始化 Chunk 状态 + 按需人声分离
+            chunk_states = self._init_chunk_states(vad_segments, audio_array, sr)
+            demucs_service = get_demucs_service()
+
+            chunks_to_separate = [(i, chunk_states[i], diagnoses[i])
+                                  for i in range(len(diagnoses))
+                                  if diagnoses[i].need_separation]
+
+            if chunks_to_separate:
+                progress_tracker.start_phase(ProcessPhase.DEMUCS, len(chunks_to_separate), "人声分离...")
+                for sep_idx, (chunk_idx, chunk_state, diag) in enumerate(chunks_to_separate):
+                    # 执行分离，更新 current_audio
+                    separated_audio = demucs_service.separate_chunk(
+                        audio=chunk_state.original_audio,
+                        model=diag.recommended_model,
+                        sr=sr
+                    )
+                    chunk_state.current_audio = separated_audio
+                    chunk_state.separation_level = (
+                        SeparationLevel.HTDEMUCS if diag.recommended_model == "htdemucs"
+                        else SeparationLevel.MDX_EXTRA
+                    )
+                    chunk_state.separation_model_used = diag.recommended_model
+                    progress_tracker.update_phase(ProcessPhase.DEMUCS, increment=1)
+                progress_tracker.complete_phase(ProcessPhase.DEMUCS)
+
+            # 5. 逐Chunk转录 + 熔断回溯（转录层核心）
+            progress_tracker.start_phase(ProcessPhase.SENSEVOICE, len(chunk_states), "SenseVoice 转录...")
+            all_sentences = []
+
+            for chunk_state in chunk_states:
+                # 单个 Chunk 转录（含熔断回溯循环）
+                sentences = await self._transcribe_chunk_with_fusing(
+                    chunk_state=chunk_state,
+                    job=job,
+                    subtitle_manager=subtitle_manager,
+                    demucs_service=demucs_service
+                )
+                all_sentences.extend(sentences)
+                progress_tracker.update_phase(ProcessPhase.SENSEVOICE, increment=1)
+
+            progress_tracker.complete_phase(ProcessPhase.SENSEVOICE)
+
+            # 6. 后处理增强（Whisper补刀、LLM校对/翻译）
+            final_results = await self._post_process_enhancement(
+                all_sentences, audio_array, job, subtitle_manager, solution_config
+            )
+
+            # 7. 生成字幕
+            progress_tracker.start_phase(ProcessPhase.SRT, 1, "生成字幕...")
+            output_path = str(Path(job.job_dir) / f"{job.job_id}.srt")
+            self._generate_subtitle_from_sentences(
+                final_results,
+                output_path,
+                include_translation=(solution_config.translate != TranslateMode.OFF)
+            )
+            progress_tracker.complete_phase(ProcessPhase.SRT)
+
+            # 8. 完成
+            job.status = 'completed'
+            push_signal_event(get_sse_manager(), job.job_id, "job_complete", "处理完成")
+
+        except Exception as e:
+            self.logger.error(f"SenseVoice 处理失败: {e}", exc_info=True)
+            job.status = 'failed'
+            job.error = str(e)
+            push_signal_event(get_sse_manager(), job.job_id, "job_failed", str(e))
+            raise
+
+        finally:
+            # 清理资源
+            remove_streaming_subtitle_manager(job.job_id)
+            remove_progress_tracker(job.job_id)
+
 
 # 单例处理器
 _service_instance: Optional[TranscriptionService] = None

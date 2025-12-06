@@ -47,8 +47,38 @@ class DemucsSettings:
 
 
 @dataclass
+class SenseVoiceSettings:
+    """SenseVoice 转录引擎配置"""
+    # === 预设方案 ===
+    preset_id: str = "default"                  # 预设ID: default/preset1-5/custom
+
+    # === 增强模式 ===
+    enhancement: str = "off"                    # off/smart_patch/deep_listen
+    # - off: 仅 SenseVoice
+    # - smart_patch: 低置信度自动 Whisper 补刀
+    # - deep_listen: Whisper 全文转录
+
+    # === 校对模式 ===
+    proofread: str = "off"                      # off/sparse/full
+    # - off: 不校对
+    # - sparse: 仅校对低置信度和疑问片段
+    # - full: 滑动窗口全量校对润色
+
+    # === 翻译模式 ===
+    translate: str = "off"                      # off/full/partial
+    target_language: str = "en"                 # 翻译目标语言
+
+    # === 阈值配置 ===
+    confidence_threshold: float = 0.6           # 低置信度阈值
+    whisper_patch_threshold: float = 0.5        # 触发 Whisper 补刀的阈值
+
+
+@dataclass
 class JobSettings:
     """转录任务设置"""
+    # === 转录引擎选择 ===
+    engine: str = "whisper"                     # 转录引擎: whisper/sensevoice
+
     model: str = "medium"
     compute_type: str = "float16"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,6 +86,9 @@ class JobSettings:
     word_timestamps: bool = False
     cpu_affinity: Optional["CPUAffinityConfig"] = None  # 使用字符串形式的类型注解
     demucs: DemucsSettings = field(default_factory=DemucsSettings)  # Demucs配置
+
+    # === SenseVoice 配置 ===
+    sensevoice: SenseVoiceSettings = field(default_factory=SenseVoiceSettings)
 
 
 @dataclass
@@ -128,6 +161,7 @@ class JobState:
             "canceled": self.canceled,
             "paused": self.paused,
             "settings": {
+                "engine": self.settings.engine,
                 "model": self.settings.model,
                 "compute_type": self.settings.compute_type,
                 "device": self.settings.device,
@@ -158,6 +192,15 @@ class JobState:
                     "problem_segment_suffix": self.settings.demucs.problem_segment_suffix,
                     # 质量预设
                     "quality_preset": self.settings.demucs.quality_preset,
+                },
+                "sensevoice": {
+                    "preset_id": self.settings.sensevoice.preset_id,
+                    "enhancement": self.settings.sensevoice.enhancement,
+                    "proofread": self.settings.sensevoice.proofread,
+                    "translate": self.settings.sensevoice.translate,
+                    "target_language": self.settings.sensevoice.target_language,
+                    "confidence_threshold": self.settings.sensevoice.confidence_threshold,
+                    "whisper_patch_threshold": self.settings.sensevoice.whisper_patch_threshold,
                 }
             },
             "updated_at": time.time()
@@ -206,13 +249,27 @@ class JobState:
             quality_preset=demucs_data.get("quality_preset", "balanced"),
         )
 
+        # 处理 SenseVoice 配置（向后兼容）
+        sensevoice_data = settings_data.get("sensevoice", {})
+        sensevoice_settings = SenseVoiceSettings(
+            preset_id=sensevoice_data.get("preset_id", "default"),
+            enhancement=sensevoice_data.get("enhancement", "off"),
+            proofread=sensevoice_data.get("proofread", "off"),
+            translate=sensevoice_data.get("translate", "off"),
+            target_language=sensevoice_data.get("target_language", "en"),
+            confidence_threshold=sensevoice_data.get("confidence_threshold", 0.6),
+            whisper_patch_threshold=sensevoice_data.get("whisper_patch_threshold", 0.5),
+        )
+
         settings = JobSettings(
+            engine=settings_data.get("engine", "whisper"),
             model=settings_data.get("model", "medium"),
             compute_type=settings_data.get("compute_type", "float16"),
             device=settings_data.get("device", "cuda"),
             batch_size=settings_data.get("batch_size", 16),
             word_timestamps=settings_data.get("word_timestamps", False),
             demucs=demucs_settings,
+            sensevoice=sensevoice_settings,
         )
 
         return cls(
