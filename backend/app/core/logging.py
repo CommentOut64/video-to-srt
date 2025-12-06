@@ -82,7 +82,8 @@ def setup_logging():
 
     # 设置第三方库日志级别为WARNING
     third_party_loggers = [
-        'urllib3', 'multipart', 'transformers', 'whisperx',
+        'urllib3', 'multipart', 'transformers',
+        'faster_whisper', 'ctranslate2',  # Faster-Whisper 及其底层库
         'silero', 'torch', 'pytorch_lightning', 'pyannote',
         'speechbrain', 'whisper'
     ]

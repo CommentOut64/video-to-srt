@@ -22,10 +22,8 @@ class ModelPreloadConfig:
     # 预加载配置
     PRELOAD_TIMEOUT = int(os.getenv("MODEL_PRELOAD_TIMEOUT", "300"))
     WARMUP_ENABLED = os.getenv("MODEL_WARMUP_ENABLED", "true").lower() == "true"
-    
-    # 对齐模型配置
-    ALIGN_MODEL_CACHE_SIZE = int(os.getenv("ALIGN_MODEL_CACHE_SIZE", "5"))
-    
+
+  
     # 内存监控配置
     MEMORY_CHECK_INTERVAL = int(os.getenv("MEMORY_CHECK_INTERVAL", "60"))  # 秒
     
@@ -53,7 +51,6 @@ class ModelPreloadConfig:
         print(f"  内存阈值: {cls.MEMORY_THRESHOLD}")
         print(f"  预加载超时: {cls.PRELOAD_TIMEOUT}s")
         print(f"  启用预热: {cls.WARMUP_ENABLED}")
-        print(f"  对齐模型缓存大小: {cls.ALIGN_MODEL_CACHE_SIZE}")
 
 
 # 常用模型配置

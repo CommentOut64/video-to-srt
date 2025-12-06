@@ -22,7 +22,6 @@
 ### v2.0 新增（时空解耦架构）
 
 - ✅ **核心修改**：Whisper 补刀**仅取文本**，时间戳由 SenseVoice 确定
-- ✅ **新增**：WhisperX 强制对齐作为**可选模块**
 - ✅ **新增**：伪对齐算法集成（Phase 1 的 `pseudo_alignment.py`）
 - ✅ **新增**：字幕流式输出系统 `streaming_subtitle.py`
 - ✅ **新增**：智能进度追踪集成（Phase 1 的 `progress_tracker.py`）
@@ -44,7 +43,6 @@
 | **频谱分诊集成** | `transcription_service.py` | **P0** | **修改** |
 | **时空解耦补刀逻辑** | `transcription_service.py` | **P0** | **修改** |
 | **流式字幕输出系统** | `streaming_subtitle.py` | **P0** | **新建** |
-| **WhisperX 可选模块** | `whisperx_align_service.py` | **P2** | **新建** |
 | 时间戳偏移修正 | `transcription_service.py` | P0 | 修改 |
 | 熔断逻辑集成 | `transcription_service.py` | P0 | 修改 |
 | 句级 SSE 推送 | `transcription_service.py` | P1 | 修改 |
@@ -122,13 +120,11 @@
 │     │  - 仅取文本，弃用时间戳                                   │
 │     │  - 应用伪对齐生成字级时间戳                               │
 │     ↓                                                           │
-│  7. [可选] WhisperX 强制对齐                                    │
+│  7. [可选] LLM 校对                                             │
 │     ↓                                                           │
-│  8. [可选] LLM 校对                                             │
+│  8. [可选] LLM 翻译                                             │
 │     ↓                                                           │
-│  9. [可选] LLM 翻译                                             │
-│     ↓                                                           │
-│  10. 生成字幕文件                                               │
+│  9. 生成字幕文件                                                │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -232,7 +228,6 @@ class StreamingSubtitleManager:
         # 推送 SSE 事件
         event_type = {
             TextSource.WHISPER_PATCH: "whisper_patch",
-            TextSource.WHISPERX_ALIGN: "whisper_patch",
             TextSource.LLM_CORRECTION: "llm_proof",
             TextSource.LLM_TRANSLATION: "llm_trans",
         }.get(source, "batch_update")
@@ -609,9 +604,8 @@ async def _post_process_enhancement(
 
     根据用户配置执行：
     1. 低置信度句子 → Whisper 补刀（仅文本 + 伪对齐）
-    2. [可选] WhisperX 强制对齐
-    3. [可选] LLM 校对
-    4. [可选] LLM 翻译
+    2. [可选] LLM 校对
+    3. [可选] LLM 翻译
 
     注意：这不是熔断，熔断在转录阶段已经处理完成
     """
@@ -640,15 +634,11 @@ async def _post_process_enhancement(
 
         progress_tracker.complete_phase(ProcessPhase.WHISPER_PATCH)
 
-    # 3. [可选] WhisperX 强制对齐
-    if solution_config.enable_whisperx_align:
-        await self._apply_whisperx_alignment(sentences, audio_array, job, subtitle_manager)
-
-    # 4. [可选] LLM 校对
+    # 3. [可选] LLM 校对
     if solution_config.proofread != ProofreadMode.OFF:
         await self._llm_proofread(sentences, job, subtitle_manager, solution_config)
 
-    # 5. [可选] LLM 翻译
+    # 4. [可选] LLM 翻译
     if solution_config.translate != TranslateMode.OFF:
         await self._llm_translate(sentences, job, subtitle_manager, solution_config)
 
@@ -657,160 +647,7 @@ async def _post_process_enhancement(
 
 ---
 
-## 六、WhisperX 可选模块（新增）
-
-**路径**: `backend/app/services/whisperx_align_service.py`
-
-```python
-"""
-WhisperX 强制对齐服务（可选模块）
-
-使用场景：
-- 卡拉OK 字幕
-- 歌词同步
-- 其他需要极高精度时间轴的场景
-
-成本：较高（需要额外下载对齐模型）
-"""
-import logging
-from typing import List, Optional
-from ..models.sensevoice_models import SentenceSegment, WordTimestamp, TextSource
-
-logger = logging.getLogger(__name__)
-
-
-class WhisperXAlignService:
-    """WhisperX 强制对齐服务"""
-
-    def __init__(self):
-        self.model = None
-        self.align_model = None
-        self.metadata = None
-        self._is_loaded = False
-
-    @property
-    def is_loaded(self) -> bool:
-        return self._is_loaded
-
-    def load_model(self, language: str = "zh"):
-        """加载对齐模型"""
-        if self._is_loaded:
-            return
-
-        try:
-            import whisperx
-            import torch
-
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-
-            # 加载对齐模型
-            self.align_model, self.metadata = whisperx.load_align_model(
-                language_code=language,
-                device=device
-            )
-
-            self._is_loaded = True
-            logger.info(f"WhisperX 对齐模型已加载 (language={language})")
-
-        except ImportError:
-            logger.error("WhisperX 未安装，请运行: pip install whisperx")
-            raise
-        except Exception as e:
-            logger.error(f"加载 WhisperX 对齐模型失败: {e}")
-            raise
-
-    def unload_model(self):
-        """卸载对齐模型"""
-        if self.align_model is not None:
-            del self.align_model
-            self.align_model = None
-            self.metadata = None
-            self._is_loaded = False
-
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except:
-                pass
-
-            logger.info("WhisperX 对齐模型已卸载")
-
-    def align(
-        self,
-        audio_array,
-        sentence: SentenceSegment,
-        language: str = "zh"
-    ) -> List[WordTimestamp]:
-        """
-        执行强制对齐
-
-        Args:
-            audio_array: 音频数组
-            sentence: 句子段落
-            language: 语言代码
-
-        Returns:
-            List[WordTimestamp]: 精确的字级时间戳
-        """
-        if not self._is_loaded:
-            self.load_model(language)
-
-        try:
-            import whisperx
-
-            # 构造 WhisperX 期望的输入格式
-            segments = [{
-                "start": sentence.start,
-                "end": sentence.end,
-                "text": sentence.text
-            }]
-
-            # 执行对齐
-            result = whisperx.align(
-                segments,
-                self.align_model,
-                self.metadata,
-                audio_array,
-                device="cuda" if self.align_model.device.type == "cuda" else "cpu"
-            )
-
-            # 转换为 WordTimestamp
-            aligned_words = []
-            for seg in result.get("segments", []):
-                for word_info in seg.get("words", []):
-                    aligned_words.append(WordTimestamp(
-                        word=word_info.get("word", ""),
-                        start=word_info.get("start", sentence.start),
-                        end=word_info.get("end", sentence.end),
-                        confidence=word_info.get("score", 1.0),
-                        is_pseudo=False  # 强制对齐的结果
-                    ))
-
-            return aligned_words
-
-        except Exception as e:
-            logger.error(f"WhisperX 对齐失败: {e}")
-            # 返回原有时间戳
-            return sentence.words
-
-
-# ========== 单例访问 ==========
-
-_whisperx_service_instance = None
-
-
-def get_whisperx_align_service() -> WhisperXAlignService:
-    """获取 WhisperX 对齐服务单例"""
-    global _whisperx_service_instance
-    if _whisperx_service_instance is None:
-        _whisperx_service_instance = WhisperXAlignService()
-    return _whisperx_service_instance
-```
-
----
-
-## 七、主处理流程（v2.1 概念澄清版）
+## 六、主处理流程（v2.1 概念澄清版）
 
 ```python
 async def _process_video_sensevoice(self, job: JobState):
@@ -820,8 +657,8 @@ async def _process_video_sensevoice(self, job: JobState):
     流程说明：
     1-4: 准备阶段（音频提取、VAD、频谱分诊、按需分离）
     5: 转录阶段（逐Chunk转录 + 熔断回溯）
-    6-9: 后处理增强阶段（Whisper补刀、WhisperX、LLM校对/翻译）
-    10: 输出阶段（生成字幕）
+    6-8: 后处理增强阶段（Whisper补刀、LLM校对/翻译）
+    9: 输出阶段（生成字幕）
     """
     from .streaming_subtitle import get_streaming_subtitle_manager, remove_streaming_subtitle_manager
     from .progress_tracker import get_progress_tracker, remove_progress_tracker, ProcessPhase
@@ -904,7 +741,7 @@ async def _process_video_sensevoice(self, job: JobState):
         # 后处理增强层（所有 Chunk 转录完成后，根据用户配置执行）
         # ═══════════════════════════════════════════════════════════════
 
-        # 6. 后处理增强（Whisper补刀、WhisperX、LLM校对/翻译）
+        # 6. 后处理增强（Whisper补刀、LLM校对/翻译）
         final_results = await self._post_process_enhancement(
             all_sentences, audio_array, job, subtitle_manager, solution_config
         )
@@ -933,7 +770,7 @@ async def _process_video_sensevoice(self, job: JobState):
 
 ---
 
-## 八、验收标准（扩展）
+## 七、验收标准（扩展）
 
 ### 基础功能
 
@@ -965,7 +802,6 @@ async def _process_video_sensevoice(self, job: JobState):
 - [ ] Whisper 补刀**仅使用文本**，时间戳不变
 - [ ] 伪对齐正确生成字级时间戳
 - [ ] `SentenceSegment.source` 正确标记来源
-- [ ] WhisperX 作为可选模块正常工作
 
 ### 流式输出系统
 
@@ -980,6 +816,6 @@ async def _process_video_sensevoice(self, job: JobState):
 
 ---
 
-## 九、下一步
+## 七、下一步
 
 完成 Phase 3（修订版 v2.1）后，进入 [Phase 4: 前端适配（修订版）](./04_Phase4_前端适配_修订版.md)

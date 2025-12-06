@@ -5,7 +5,6 @@
 - SenseVoice 确定的时间窗口（start/end）不可变
 - 当 Whisper/LLM 替换文本后，新字符均匀分布在原时间窗口内
 - 生成的字级时间戳标记为 is_pseudo=True
-- 如需高精度时间戳，可启用 WhisperX 强制对齐（可选）
 """
 from typing import List, TYPE_CHECKING
 import logging

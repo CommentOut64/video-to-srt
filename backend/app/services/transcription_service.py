@@ -9,7 +9,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from collections import OrderedDict  # 新增导入
 from pydub import AudioSegment, silence
-import whisperx
+from .whisper_service import get_whisper_service, load_audio as whisper_load_audio
 import torch
 import shutil
 import psutil
@@ -354,12 +354,8 @@ from core.config import config  # 导入统一配置
 # 全局模型缓存 (按 (model, compute_type, device) 键)
 _model_cache: Dict[Tuple[str, str, str], object] = {}
 
-# 对齐模型缓存（改为OrderedDict，支持LRU）
-_align_model_cache: OrderedDict[str, Tuple[object, object]] = OrderedDict()
-_MAX_ALIGN_MODELS = 3  # 最多缓存3种语言的对齐模型
 
 _model_lock = threading.Lock()
-_align_lock = threading.Lock()
 
 
 class TranscriptionService:
@@ -2004,7 +2000,8 @@ class TranscriptionService:
         """
         try:
             self.logger.info(f"加载音频到内存: {audio_path}")
-            audio_array = whisperx.load_audio(audio_path)
+            # 使用 whisper_service 提供的 load_audio 函数加载音频
+            audio_array = whisper_load_audio(audio_path)
 
             # 验证加载结果
             if audio_array is None or len(audio_array) == 0:
@@ -2958,7 +2955,7 @@ class TranscriptionService:
 
     def _get_model(self, settings: JobSettings, job: Optional[JobState] = None):
         """
-        获取WhisperX模型（带缓存）
+        获取 Faster-Whisper 模型（带缓存）
 
         优先使用模型管理服务检查并下载模型，否则使用简单缓存
 
@@ -3001,7 +2998,7 @@ class TranscriptionService:
                     # 触发下载
                     success = model_mgr.download_whisper_model(settings.model)
                     if not success:
-                        self.logger.warning(f"模型管理器下载失败或已在下载中,回退到whisperx")
+                        self.logger.warning(f"模型管理器下载失败或已在下载中,使用备用方式")
                         raise RuntimeError("模型管理器下载失败")
 
                     # 等待下载完成（最多等待10分钟）
@@ -3023,7 +3020,7 @@ class TranscriptionService:
                                 job.message = f"模型下载完成,准备加载"
                             break
                         elif current_status == "error":
-                            self.logger.error(f"模型管理器下载失败,回退到whisperx")
+                            self.logger.error(f"模型管理器下载失败,使用备用方式")
                             raise RuntimeError(f"Whisper模型下载失败: {settings.model}")
                         else:
                             # 如果模型大小>=1GB,定期提醒用户耐心等待
@@ -3040,11 +3037,11 @@ class TranscriptionService:
                                     job.message = wait_msg
 
                     if elapsed >= max_wait_time:
-                        self.logger.error(f"模型下载超时,回退到whisperx")
+                        self.logger.error(f"模型下载超时,使用备用方式")
                         raise TimeoutError(f"Whisper模型下载超时: {settings.model}")
 
         except Exception as e:
-            self.logger.warning(f"模型管理服务检查失败,回退到whisperx: {e}")
+            self.logger.warning(f"模型管理服务检查失败,使用备用方式: {e}")
 
         # 尝试使用模型预加载管理器
         try:
@@ -3072,14 +3069,15 @@ class TranscriptionService:
             if job:
                 job.message = f"加载模型 {settings.model}"
 
-            # 首先尝试仅使用本地文件
+            # 首先尝试仅使用本地文件 (使用 Faster-Whisper)
             try:
                 from core.config import config
-                m = whisperx.load_model(
+                from faster_whisper import WhisperModel
+                m = WhisperModel(
                     settings.model,
-                    settings.device,
+                    device=settings.device,
                     compute_type=settings.compute_type,
-                    download_root=str(config.HF_CACHE_DIR),  # 指定缓存路径
+                    download_root=str(config.HF_CACHE_DIR),
                     local_files_only=True  # 禁止自动下载，只使用本地文件
                 )
                 _model_cache[key] = m
@@ -3087,15 +3085,15 @@ class TranscriptionService:
                     job.message = "模型加载完成"
                 return m
             except Exception as e:
-                self.logger.warning(f"本地加载失败,允许whisperx下载: {e}")
+                self.logger.warning(f"本地加载失败,允许下载: {e}")
                 if job:
-                    job.message = "本地模型不存在,使用whisperx下载"
-                # 如果本地加载失败,允许whisperx下载
-                m = whisperx.load_model(
+                    job.message = "本地模型不存在,正在下载"
+                # 如果本地加载失败,允许下载
+                m = WhisperModel(
                     settings.model,
-                    settings.device,
+                    device=settings.device,
                     compute_type=settings.compute_type,
-                    download_root=str(config.HF_CACHE_DIR),  # 指定缓存路径
+                    download_root=str(config.HF_CACHE_DIR),
                     local_files_only=False  # 允许下载
                 )
                 _model_cache[key] = m
@@ -3103,176 +3101,7 @@ class TranscriptionService:
                     job.message = "模型下载并加载完成"
                 return m
 
-    def _get_align_model(self, lang: str, device: str, job: Optional[JobState] = None):
-        """
-        获取对齐模型（带LRU缓存）
-
-        策略:
-        - 缓存命中：移到末尾（标记为最近使用）
-        - 缓存已满：删除最久未使用的模型
-        - 最多缓存3种语言
-
-        Args:
-            lang: 语言代码
-            device: 设备 (cuda/cpu)
-            job: 任务状态对象(可选,用于更新下载进度)
-
-        Returns:
-            Tuple[model, metadata]: 对齐模型和元数据
-        """
-        global _align_model_cache, _MAX_ALIGN_MODELS
-
-        with _align_lock:
-            # 1. 检查缓存命中
-            if lang in _align_model_cache:
-                # 命中：移到末尾（最近使用）
-                _align_model_cache.move_to_end(lang)
-                self.logger.debug(f"命中对齐模型缓存: {lang} (缓存: {list(_align_model_cache.keys())})")
-                if job:
-                    job.message = "使用缓存的对齐模型"
-                return _align_model_cache[lang]
-
-            # 2. 缓存未命中，检查是否需要淘汰
-            if len(_align_model_cache) >= _MAX_ALIGN_MODELS:
-                # 缓存已满，删除最久未使用的（队首）
-                oldest_lang, (oldest_model, _) = _align_model_cache.popitem(last=False)
-                self.logger.info(f"淘汰最久未用的对齐模型: {oldest_lang} (为 {lang} 腾出空间)")
-
-                # 显式删除模型对象
-                try:
-                    del oldest_model
-                except:
-                    pass
-
-        # 3. 加载新模型（保留原有的下载和加载逻辑）
-        self.logger.debug(f"Loading alignment model: {lang}")
-        if job:
-            job.message = f"加载对齐模型 {lang}"
-
-        # 尝试使用模型预加载管理器（优先从LRU缓存获取）
-        try:
-            from services.model_preload_manager import get_model_manager as get_preload_manager
-            preload_mgr = get_preload_manager()
-            if preload_mgr:
-                self.logger.debug("尝试从预加载管理器获取对齐模型")
-                if job:
-                    job.message = "加载对齐模型"
-                am, meta = preload_mgr.get_align_model(lang, device)
-                # 4. 加入缓存（自动放在末尾，标记为最近使用）
-                with _align_lock:
-                    _align_model_cache[lang] = (am, meta)
-                    self.logger.info(f"对齐模型已缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
-                return am, meta
-        except Exception as e:
-            self.logger.debug(f"预加载管理器获取失败，使用直接加载: {e}")
-
-            # 检查模型是否需要下载（使用模型管理服务）
-            try:
-                from services.model_manager_service import get_model_manager
-                model_mgr = get_model_manager()
-                align_model_info = model_mgr.align_models.get(lang)
-
-                if align_model_info and (align_model_info.status == "not_downloaded" or align_model_info.status == "incomplete"):
-                    # 检查模型状态,如果未下载或不完整则触发下载
-                    if align_model_info.status == "incomplete":
-                        self.logger.warning(f"对齐模型不完整: {lang}")
-                    else:
-                        self.logger.warning(f"对齐模型未下载: {lang}")
-
-                    # 对齐模型通常为1.2GB左右,给出大模型提示
-                    download_msg = "当前下载模型大于1GB (约1.2GB),请耐心等待"
-                    self.logger.info(f"{download_msg}")
-                    self.logger.info(f"自动触发下载对齐模型: {lang}")
-
-                    # 更新任务状态
-                    if job:
-                        job.message = download_msg
-
-                    # 触发下载
-                    success = model_mgr.download_align_model(lang)
-                    if not success:
-                        self.logger.warning(f"模型管理器下载失败或已在下载中,回退到whisperx")
-                        raise RuntimeError("模型管理器下载失败")
-
-                    # 等待下载完成（最多等待10分钟,对齐模型较大）
-                    import time
-                    max_wait_time = 600  # 10分钟
-                    wait_interval = 5  # 每5秒检查一次
-                    elapsed = 0
-
-                    while elapsed < max_wait_time:
-                        time.sleep(wait_interval)
-                        elapsed += wait_interval
-
-                        current_status = model_mgr.align_models[lang].status
-                        progress = model_mgr.align_models[lang].download_progress
-
-                        if current_status == "ready":
-                            self.logger.info(f"对齐模型下载完成: {lang}")
-                            if job:
-                                job.message = "对齐模型下载完成,准备加载"
-                            break
-                        elif current_status == "error":
-                            self.logger.error(f"模型管理器下载失败,回退到whisperx")
-                            raise RuntimeError(f"对齐模型下载失败: {lang}")
-                        else:
-                            # 定期提醒用户耐心等待(每30秒)
-                            if elapsed % 30 == 0:
-                                wait_msg = f"当前下载模型大于1GB,请耐心等待... {progress:.1f}% ({elapsed}s/{max_wait_time}s)"
-                                self.logger.info(f"{wait_msg}")
-                                if job:
-                                    job.message = wait_msg
-                            else:
-                                wait_msg = f"等待对齐模型下载... {progress:.1f}%"
-                                self.logger.info(f"{wait_msg} ({elapsed}s/{max_wait_time}s)")
-                                # 更新任务状态(每次都更新,这样用户可以看到进度变化)
-                                if job:
-                                    job.message = wait_msg
-
-                    if elapsed >= max_wait_time:
-                        self.logger.error(f"模型下载超时,回退到whisperx")
-                        raise TimeoutError(f"对齐模型下载超时: {lang}")
-
-            except Exception as e:
-                self.logger.warning(f"模型管理服务检查失败,回退到whisperx: {e}")
-
-            # 直接加载模型（如果已下载或下载完成）
-            self.logger.debug(f"Loading alignment model: {lang}")
-            if job:
-                job.message = f"加载对齐模型 {lang}"
-
-            # 首先尝试仅使用本地文件
-            try:
-                from core.config import config
-                am, meta = whisperx.load_align_model(
-                    language_code=lang,
-                    device=device,
-                    model_dir=str(config.HF_CACHE_DIR)  # 指定缓存路径
-                )
-                # 加入缓存（自动放在末尾，标记为最近使用）
-                with _align_lock:
-                    _align_model_cache[lang] = (am, meta)
-                    self.logger.info(f"对齐模型已缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
-                if job:
-                    job.message = "对齐模型加载完成"
-                return am, meta
-            except Exception as e:
-                self.logger.warning(f"本地加载对齐模型失败,允许whisperx下载: {e}")
-                if job:
-                    job.message = "本地对齐模型不存在,使用whisperx下载"
-                # 如果本地加载失败,允许whisperx下载
-                am, meta = whisperx.load_align_model(
-                    language_code=lang,
-                    device=device
-                )
-                # 加入缓存（自动放在末尾，标记为最近使用）
-                with _align_lock:
-                    _align_model_cache[lang] = (am, meta)
-                    self.logger.info(f"对齐模型已下载并缓存: {lang} (当前缓存: {list(_align_model_cache.keys())})")
-                if job:
-                    job.message = "对齐模型下载并加载完成"
-                return am, meta
-
+  
     def _transcribe_segment_unaligned(
         self,
         seg: Dict,
@@ -3284,7 +3113,7 @@ class TranscriptionService:
 
         Args:
             seg: 段信息 {file, start_ms, duration_ms, index}
-            model: Whisper模型
+            model: Faster-Whisper 模型
             job: 任务状态
 
         Returns:
@@ -3295,40 +3124,44 @@ class TranscriptionService:
                 "segments": [{"id": 0, "start": 10.5, "end": 15.2, "text": "..."}]
             }
         """
-        audio = whisperx.load_audio(seg['file'])
+        # 使用 whisper_service 提供的 load_audio 函数
+        audio = whisper_load_audio(seg['file'])
 
         try:
-            # 仅进行Transcription，不进行Alignment
-            rs = model.transcribe(
+            # 使用 Faster-Whisper 转录
+            segments_gen, info = model.transcribe(
                 audio,
-                batch_size=job.settings.batch_size,
-                verbose=False,
-                language=job.language
+                language=job.language,
+                beam_size=5,
+                vad_filter=True
             )
 
-            if not rs or 'segments' not in rs:
+            # 转换生成器为列表
+            segments_list = list(segments_gen)
+
+            if not segments_list:
                 return None
 
             # 检测语言（首次）
-            if not job.language and 'language' in rs:
-                job.language = rs['language']
-                self.logger.info(f"🌐 检测到语言: {job.language}")
+            if not job.language and info.language:
+                job.language = info.language
+                self.logger.info(f"检测到语言: {job.language}")
 
             # 时间偏移校正（针对粗略时间戳）
             start_offset = seg['start_ms'] / 1000.0
             adjusted_segments = []
 
-            for idx, s in enumerate(rs['segments']):
+            for idx, s in enumerate(segments_list):
                 adjusted_segments.append({
                     'id': idx,
-                    'start': s.get('start', 0) + start_offset,
-                    'end': s.get('end', 0) + start_offset,
-                    'text': s.get('text', '').strip()
+                    'start': s.start + start_offset,
+                    'end': s.end + start_offset,
+                    'text': s.text.strip()
                 })
 
             return {
-                'segment_index': seg.get('index', 0),  # 需要在调用时传入
-                'language': rs.get('language', job.language),
+                'segment_index': seg.get('index', 0),
+                'language': info.language or job.language,
                 'segments': adjusted_segments
             }
 
@@ -3352,7 +3185,7 @@ class TranscriptionService:
         Args:
             audio_array: 完整音频数组
             seg_meta: 分段元数据 {"index": 0, "start": 0.0, "end": 30.5, "mode": "memory"}
-            model: Whisper模型
+            model: Faster-Whisper 模型
             job: 任务状态
             is_vocals: 是否是Demucs分离后的人声（用于日志）
 
@@ -3367,37 +3200,40 @@ class TranscriptionService:
         audio_slice = audio_array[start_sample:end_sample]
 
         try:
-            # Whisper转录
-            rs = model.transcribe(
+            # 使用 Faster-Whisper 转录
+            segments_gen, info = model.transcribe(
                 audio_slice,
-                batch_size=job.settings.batch_size,
-                verbose=False,
-                language=job.language
+                language=job.language,
+                beam_size=5,
+                vad_filter=False  # 已经是切片，不需要再做 VAD
             )
 
-            if not rs or 'segments' not in rs:
+            # 转换生成器为列表
+            segments_list = list(segments_gen)
+
+            if not segments_list:
                 return None
 
             # 检测语言（首次）
-            if not job.language and 'language' in rs:
-                job.language = rs['language']
+            if not job.language and info.language:
+                job.language = info.language
                 self.logger.info(f"detected language: {job.language}")
 
             # 时间偏移校正
             start_offset = seg_meta['start']
             adjusted_segments = []
 
-            for idx, s in enumerate(rs['segments']):
+            for idx, s in enumerate(segments_list):
                 adjusted_segments.append({
                     'id': idx,
-                    'start': s.get('start', 0) + start_offset,
-                    'end': s.get('end', 0) + start_offset,
-                    'text': s.get('text', '').strip()
+                    'start': s.start + start_offset,
+                    'end': s.end + start_offset,
+                    'text': s.text.strip()
                 })
 
             return {
                 'segment_index': seg_meta['index'],
-                'language': rs.get('language', job.language),
+                'language': info.language or job.language,
                 'segments': adjusted_segments
             }
 
@@ -3418,45 +3254,50 @@ class TranscriptionService:
 
         Args:
             seg: 分段信息 {"index": 0, "file": "segment_0.wav", "start": 0.0, "end": 30.0, "mode": "disk"}
-            model: Whisper模型
+            model: Faster-Whisper 模型
             job: 任务状态
 
         Returns:
             Dict: 未对齐的转录结果
         """
-        audio = whisperx.load_audio(seg['file'])
+        # 使用 whisper_service 提供的 load_audio 函数
+        audio = whisper_load_audio(seg['file'])
 
         try:
-            rs = model.transcribe(
+            # 使用 Faster-Whisper 转录
+            segments_gen, info = model.transcribe(
                 audio,
-                batch_size=job.settings.batch_size,
-                verbose=False,
-                language=job.language
+                language=job.language,
+                beam_size=5,
+                vad_filter=True
             )
 
-            if not rs or 'segments' not in rs:
+            # 转换生成器为列表
+            segments_list = list(segments_gen)
+
+            if not segments_list:
                 return None
 
             # 检测语言（首次）
-            if not job.language and 'language' in rs:
-                job.language = rs['language']
+            if not job.language and info.language:
+                job.language = info.language
                 self.logger.info(f"detected language: {job.language}")
 
             # 时间偏移校正（使用start字段，秒为单位）
             start_offset = seg.get('start', seg.get('start_ms', 0) / 1000.0)
             adjusted_segments = []
 
-            for idx, s in enumerate(rs['segments']):
+            for idx, s in enumerate(segments_list):
                 adjusted_segments.append({
                     'id': idx,
-                    'start': s.get('start', 0) + start_offset,
-                    'end': s.get('end', 0) + start_offset,
-                    'text': s.get('text', '').strip()
+                    'start': s.start + start_offset,
+                    'end': s.end + start_offset,
+                    'text': s.text.strip()
                 })
 
             return {
                 'segment_index': seg['index'],
-                'language': rs.get('language', job.language),
+                'language': info.language or job.language,
                 'segments': adjusted_segments
             }
 
@@ -3535,57 +3376,26 @@ class TranscriptionService:
         audio_path: str
     ) -> List[Dict]:
         """
-        对所有未对齐的转录结果进行统一对齐
+        合并转录结果的分段
 
-        Args:
-            unaligned_results: 所有未对齐的转录结果
-            job: 任务状态
-            audio_path: 完整音频文件路径
-
-        Returns:
-            List[Dict]: 对齐后的结果
+        此方法合并所有 segments 并返回，不执行对齐操作。
         """
-        self.logger.info(f"开始统一对齐 {len(unaligned_results)} 个分段的转录结果")
+        self.logger.info(f"合并 {len(unaligned_results)} 个分段的转录结果（跳过强制对齐）")
 
-        # 1. 合并所有segments
+        # 合并所有segments
         all_segments = []
         for result in unaligned_results:
             all_segments.extend(result['segments'])
 
         if not all_segments:
-            self.logger.warning("没有可对齐的内容")
+            self.logger.warning("没有可处理的内容")
             return []
 
-        # 2. 加载完整音频
-        audio = whisperx.load_audio(audio_path)
-
-        try:
-            # 3. 获取对齐模型
-            lang = job.language or unaligned_results[0].get('language', 'zh')
-            align_model, metadata = self._get_align_model(lang, job.settings.device, job)
-
-            # 4. 执行对齐（一次性处理所有segments）
-            self._update_progress(job, 'align', 0, '正在对齐时间轴...')
-
-            aligned = whisperx.align(
-                all_segments,
-                align_model,
-                metadata,
-                audio,
-                job.settings.device
-            )
-
-            self._update_progress(job, 'align', 1, '对齐完成')
-
-            # 5. 返回对齐后的结果
-            return [{
-                'segments': aligned.get('segments', []),
-                'word_segments': aligned.get('word_segments', [])
-            }]
-
-        finally:
-            del audio
-            gc.collect()
+        # 直接返回合并后的结果（Faster-Whisper 已提供时间戳）
+        return [{
+            'segments': all_segments,
+            'word_segments': []  # 新架构使用伪对齐生成字级时间戳
+        }]
 
     def _push_sse_align_progress(
         self,
@@ -3648,23 +3458,11 @@ class TranscriptionService:
         processing_mode: ProcessingMode
     ) -> List[Dict]:
         """
-        分批对齐（支持实时SSE进度推送）
+        批量处理转录结果的分段
 
-        批次对齐的优势：
-        1. 避免一次性对齐所有内容导致的长时间卡顿
-        2. 支持前端进度条实时更新
-        3. 内存使用更可控
-
-        Args:
-            unaligned_results: 所有未对齐的转录结果
-            job: 任务状态对象
-            audio_source: 音频来源（内存模式传数组，硬盘模式传路径）
-            processing_mode: 当前处理模式
-
-        Returns:
-            List[Dict]: 对齐后的结果
+        此方法合并所有 segments，应用时间校验和微调，然后返回。
         """
-        self.logger.info(f"starting batched alignment: {len(unaligned_results)} segments")
+        self.logger.info(f"处理 {len(unaligned_results)} 个分段的转录结果（跳过强制对齐）")
 
         # 1. 合并所有segments
         all_segments = []
@@ -3672,118 +3470,43 @@ class TranscriptionService:
             all_segments.extend(result['segments'])
 
         if not all_segments:
-            self.logger.warning("no segments to align")
+            self.logger.warning("没有可处理的内容")
             return []
 
-        # 2. 加载音频（根据模式）
-        if processing_mode == ProcessingMode.MEMORY:
-            audio_array = audio_source  # 直接使用内存数组
-            self.logger.info("align phase: reusing audio array from memory")
-        else:
-            # 硬盘模式：需要加载完整音频
-            self.logger.info("align phase: loading complete audio from disk...")
-            audio_array = whisperx.load_audio(audio_source)
+        # 2. 对结果进行边界校验，过滤异常结果
+        valid_segments = []
+        for seg in all_segments:
+            start = seg.get('start', 0)
+            end = seg.get('end', 0)
+            text = seg.get('text', '').strip()
 
-        try:
-            # 3. 获取对齐模型
-            lang = job.language or unaligned_results[0].get('language', 'zh')
-            align_model, metadata = self._get_align_model(lang, job.settings.device, job)
+            # 校验1：时间戳必须有效
+            if start is None or end is None or start < 0 or end <= start:
+                self.logger.warning(f"过滤无效时间戳: start={start}, end={end}, text={text[:20] if text else ''}...")
+                continue
 
-            # 4. 分批对齐
-            BATCH_SIZE = 50  # 每批50条segment
-            total_segments = len(all_segments)
-            total_batches = math.ceil(total_segments / BATCH_SIZE)
-            aligned_segments = []
+            # 校验2：字幕时长不能过长（超过30秒可能是异常）
+            duration = end - start
+            if duration > 30:
+                self.logger.warning(f"过滤过长字幕({duration:.1f}s): {text[:30] if text else ''}...")
+                continue
 
-            self.logger.info(f"alignment config: total {total_segments} segments, {BATCH_SIZE} per batch, {total_batches} batches")
+            # 校验3：字幕时长不能过短（小于0.1秒可能是噪音）
+            if duration < 0.1 and len(text) > 0:
+                self.logger.warning(f"过滤过短字幕({duration:.2f}s): {text}")
+                continue
 
-            for batch_idx in range(total_batches):
-                start_idx = batch_idx * BATCH_SIZE
-                end_idx = min(start_idx + BATCH_SIZE, total_segments)
-                batch = all_segments[start_idx:end_idx]
+            valid_segments.append(seg)
 
-                # 计算进度
-                progress = batch_idx / total_batches
+        # 3. 字幕时间微调 - 修正"抢先出现"问题
+        valid_segments = self._adjust_subtitle_timing(valid_segments)
 
-                # 更新任务进度
-                self._update_progress(
-                    job,
-                    'align',
-                    progress,
-                    f'aligning batch {batch_idx + 1}/{total_batches}'
-                )
+        self.logger.info(f"处理完成: {len(valid_segments)}/{len(all_segments)} 个有效字幕段")
 
-                # 推送对齐进度SSE（专用事件）
-                self._push_sse_align_progress(
-                    job,
-                    batch_idx + 1,
-                    total_batches,
-                    len(aligned_segments),
-                    total_segments
-                )
-
-                # 执行对齐
-                try:
-                    aligned_batch = whisperx.align(
-                        batch,
-                        align_model,
-                        metadata,
-                        audio_array,
-                        job.settings.device
-                    )
-                    
-                    # 【新增】对齐结果边界校验，过滤异常结果
-                    valid_segments = []
-                    for seg in aligned_batch.get('segments', []):
-                        start = seg.get('start', 0)
-                        end = seg.get('end', 0)
-                        text = seg.get('text', '').strip()
-                        
-                        # 校验1：时间戳必须有效
-                        if start is None or end is None or start < 0 or end <= start:
-                            self.logger.warning(f"过滤无效时间戳: start={start}, end={end}, text={text[:20]}...")
-                            continue
-                        
-                        # 校验2：字幕时长不能过长（超过30秒可能是对齐错误）
-                        duration = end - start
-                        if duration > 30:
-                            self.logger.warning(f"过滤过长字幕({duration:.1f}s): {text[:30]}...")
-                            continue
-                        
-                        # 校验3：字幕时长不能过短（小于0.1秒可能是噪音）
-                        if duration < 0.1 and len(text) > 0:
-                            self.logger.warning(f"过滤过短字幕({duration:.2f}s): {text}")
-                            continue
-                        
-                        valid_segments.append(seg)
-                    
-                    aligned_segments.extend(valid_segments)
-                    self.logger.debug(f"batch {batch_idx + 1}/{total_batches} completed, {len(valid_segments)}/{len(aligned_batch.get('segments', []))} valid")
-
-                except Exception as e:
-                    self.logger.error(f"batch {batch_idx + 1} alignment failed: {e}")
-                    # 继续处理其他批次，不中断整体流程
-                    continue
-
-            # 5. 【新增】字幕时间微调 - 修正"抢先出现"问题
-            aligned_segments = self._adjust_subtitle_timing(aligned_segments)
-
-            # 6. 完成
-            self._update_progress(job, 'align', 1, 'alignment complete')
-            self._push_sse_align_progress(job, total_batches, total_batches, total_segments, total_segments)
-
-            self.logger.info(f"batched alignment complete: {len(aligned_segments)} segments")
-
-            return [{
-                'segments': aligned_segments,
-                'word_segments': []
-            }]
-
-        finally:
-            # 如果是硬盘模式，释放加载的音频
-            if processing_mode == ProcessingMode.DISK:
-                del audio_array
-                gc.collect()
+        return [{
+            'segments': valid_segments,
+            'word_segments': []  # 新架构使用伪对齐生成字级时间戳
+        }]
 
     def _adjust_subtitle_timing(
         self,
@@ -3795,8 +3518,7 @@ class TranscriptionService:
         字幕时间微调 - 修正对齐偏差
 
         问题背景：
-        WhisperX对齐后的字幕常常"抢先出现"（开始时间过早），
-        这是因为VAD和对齐算法倾向于保守估计（宁早勿迟）。
+        转录后的字幕可能出现时间偏差，需要适当调整。
 
         解决方案：
         1. 将字幕开始时间延后 start_delay_ms（默认25ms）
@@ -3940,13 +3662,10 @@ class TranscriptionService:
         """
         清空模型缓存（供队列服务调用）
 
-        策略:
-        - 总是清理 Whisper 模型（显存占用大，1-3GB）
-        - 保留对齐模型的 LRU 缓存（占用小，每个~200MB）
+        注意: 新架构已移除对齐模型，仅清理 Whisper 模型
         """
-        global _model_cache, _align_model_cache
+        global _model_cache
 
-        # 1. 总是清理 Whisper 模型
         with _model_lock:
             for key in list(_model_cache.keys()):
                 try:
@@ -3955,14 +3674,6 @@ class TranscriptionService:
                     pass
             _model_cache.clear()
             self.logger.info("Whisper模型缓存已清空")
-
-        # 2. 保留对齐模型（记录当前缓存状态）
-        with _align_lock:
-            cached_langs = list(_align_model_cache.keys())
-            if cached_langs:
-                self.logger.debug(f"保留对齐模型缓存 (LRU): {cached_langs}")
-            else:
-                self.logger.debug("对齐模型缓存为空")
 
 
 # 单例处理器

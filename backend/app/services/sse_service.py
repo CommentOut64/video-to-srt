@@ -318,7 +318,6 @@ SSE_PROGRESS_TAGS = {
     "progress.vad": "VAD 分段进度",
     "progress.sensevoice": "SenseVoice 转录进度（流式）",
     "progress.whisper": "Whisper 补刀进度",
-    "progress.whisperx": "WhisperX 对齐进度",
     "progress.llm_proof": "LLM 校对进度",
     "progress.llm_trans": "LLM 翻译进度",
     "progress.srt": "SRT 生成进度",

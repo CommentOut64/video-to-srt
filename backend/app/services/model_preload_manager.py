@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 import psutil
 import torch
-import whisperx
+from faster_whisper import WhisperModel
 
 # 修复导入路径
 import sys
@@ -63,7 +63,6 @@ class ModelPreloadManager:
 
         # 模型缓存 (LRU)
         self._whisper_cache: OrderedDict[Tuple[str, str, str], ModelCacheInfo] = OrderedDict()
-        self._align_cache: OrderedDict[str, Tuple[Any, Any, float]] = OrderedDict()
 
         # SenseVoice 模型缓存（单例模式）
         self._sensevoice_service = None
@@ -126,20 +125,18 @@ class ModelPreloadManager:
                 }
                 for info in self._whisper_cache.values()
             ]
-            
-            align_models = list(self._align_cache.keys())
+
             total_memory = sum(info.memory_size for info in self._whisper_cache.values())
-            
+
             cache_status = {
                 "whisper_models": whisper_models,
-                "align_models": align_models,
                 "total_memory_mb": total_memory,
                 "max_cache_size": self.config.max_cache_size,
                 "memory_info": self._memory_monitor.get_memory_info(),
                 "cache_version": self._preload_status["cache_version"]
             }
-            
-            self.logger.debug(f"缓存查询: Whisper模型={len(whisper_models)}个, 对齐模型={len(align_models)}个, 内存={total_memory}MB")
+
+            self.logger.debug(f"缓存查询: Whisper模型={len(whisper_models)}个, 内存={total_memory}MB")
             return cache_status
     
     async def preload_models(self, progress_callback=None) -> Dict[str, Any]:
@@ -451,13 +448,13 @@ class ModelPreloadManager:
             # 导入配置以获取缓存路径
             from core.config import config
 
-            #  修复：添加 download_root 和 local_files_only 参数，避免重复下载
-            model = whisperx.load_model(
+            # 使用 faster_whisper 的 WhisperModel 加载模型
+            model = WhisperModel(
                 settings.model,
-                settings.device,
+                device=settings.device,
                 compute_type=settings.compute_type,
-                download_root=str(config.HF_CACHE_DIR),  # 指定缓存路径
-                local_files_only=True  # 禁止自动下载，只使用本地文件
+                download_root=str(config.HF_CACHE_DIR),
+                local_files_only=True
             )
             load_time = time.time() - start_time
 
@@ -484,63 +481,22 @@ class ModelPreloadManager:
         except Exception as e:
             self.logger.error(f"加载Whisper模型失败 {key}: {str(e)}", exc_info=True)
             raise
-    
-    def get_align_model(self, lang: str, device: str):
-        """获取对齐模型 (带LRU缓存) - 简化版本"""
-        with self._global_lock:
-            # 命中缓存
-            if lang in self._align_cache:
-                model, meta, last_used = self._align_cache[lang]
-                # 更新使用时间并移到最后
-                self._align_cache[lang] = (model, meta, time.time())
-                self._align_cache.move_to_end(lang)
-                self.logger.debug(f"命中对齐模型缓存: {lang}")
-                return model, meta
-            
-            # 缓存未命中，加载新模型
-            self.logger.info(f"加载新对齐模型: {lang}")
-            try:
-                #  修复：添加 model_dir 参数，指定缓存路径
-                from core.config import config
-                model, meta = whisperx.load_align_model(
-                    language_code=lang,
-                    device=device,
-                    model_dir=str(config.HF_CACHE_DIR)  # 指定缓存路径
-                )
-                
-                # 添加到缓存 (限制大小)
-                if len(self._align_cache) >= 5:  # 对齐模型缓存上限
-                    # 移除最旧的
-                    oldest = next(iter(self._align_cache))
-                    del self._align_cache[oldest]
-                    self.logger.debug(f"移除最旧对齐模型: {oldest}")
-                
-                self._align_cache[lang] = (model, meta, time.time())
-                
-                # 更新缓存版本号
-                self._preload_status["cache_version"] = int(time.time())
-                
-                self.logger.info(f"成功加载对齐模型: {lang}")
-                return model, meta
-                
-            except Exception as e:
-                self.logger.error(f"加载对齐模型失败 {lang}: {str(e)}", exc_info=True)
-                raise
-    
+
     def _warmup_model(self, model):
         """预热模型 - 空跑一次确保完全加载"""
         try:
             self.logger.debug("开始模型预热")
-            
+
             # 创建虚拟音频数据 (1秒静音)
             import numpy as np
             dummy_audio = np.zeros(16000, dtype=np.float32)  # 16kHz 1秒
-            
-            # 空跑一次
-            _ = model.transcribe(dummy_audio, batch_size=1, verbose=False)
-            
+
+            # 使用 transcribe 方法预热模型
+            segments, _ = model.transcribe(dummy_audio)
+            _ = list(segments)  # 触发生成器
+
             self.logger.debug("模型预热完成")
-            
+
         except Exception as e:
             self.logger.warning(f"模型预热失败: {str(e)}")
     
@@ -607,16 +563,12 @@ class ModelPreloadManager:
         with self._global_lock:
             # 记录清理前的缓存状态
             whisper_count = len(self._whisper_cache)
-            align_count = len(self._align_cache)
             total_memory = sum(info.memory_size for info in self._whisper_cache.values())
 
             # 清理Whisper模型缓存
             for info in self._whisper_cache.values():
                 del info.model
             self._whisper_cache.clear()
-
-            # 清理对齐模型缓存
-            self._align_cache.clear()
 
             # 清理 SenseVoice 模型缓存
             self.unload_sensevoice()
@@ -636,7 +588,7 @@ class ModelPreloadManager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        self.logger.info(f"已清空所有模型缓存: Whisper={whisper_count}个, 对齐={align_count}个, 释放内存={total_memory}MB")
+        self.logger.info(f"已清空所有模型缓存: Whisper={whisper_count}个, 释放内存={total_memory}MB")
 
     def evict_model(self, model_id: str, device: str = "cuda", compute_type: str = "float16"):
         """
@@ -660,24 +612,6 @@ class ModelPreloadManager:
 
                 # 更新预加载状态中的loaded_models计数
                 self._preload_status["loaded_models"] = len(self._whisper_cache)
-                self._preload_status["cache_version"] = int(time.time())
-
-        # 垃圾回收和GPU内存清理
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    def evict_align_model(self, language: str):
-        """
-        清理指定对齐模型的缓存
-
-        Args:
-            language: 语言代码
-        """
-        with self._global_lock:
-            if language in self._align_cache:
-                self._align_cache.pop(language)
-                self.logger.info(f"清理对齐模型缓存: {language}")
                 self._preload_status["cache_version"] = int(time.time())
 
         # 垃圾回收和GPU内存清理
@@ -770,29 +704,6 @@ class ModelPreloadManager:
             self.logger.error(f"下载Whisper模型失败: {model_id} - {e}")
             return False
 
-    def download_align_model(self, language: str) -> bool:
-        """
-        下载单个对齐模型（委托给模型管理服务）
-
-        Args:
-            language: 语言代码
-
-        Returns:
-            bool: 是否成功启动下载
-        """
-        try:
-            from services.model_manager_service import get_model_manager
-            model_mgr = get_model_manager()
-            success = model_mgr.download_align_model(language)
-
-            if success:
-                self.logger.info(f"已委托模型管理服务下载对齐模型: {language}")
-            return success
-
-        except Exception as e:
-            self.logger.error(f"下载对齐模型失败: {language} - {e}")
-            return False
-
     def delete_whisper_model(self, model_id: str) -> bool:
         """
         删除Whisper模型（委托给模型管理服务，并清理缓存）
@@ -835,46 +746,12 @@ class ModelPreloadManager:
             self.logger.error(f"删除Whisper模型失败: {model_id} - {e}")
             return False
 
-    def delete_align_model(self, language: str) -> bool:
-        """
-        删除对齐模型（委托给模型管理服务，并清理缓存）
-
-        Args:
-            language: 语言代码
-
-        Returns:
-            bool: 是否删除成功
-        """
-        try:
-            from services.model_manager_service import get_model_manager
-            model_mgr = get_model_manager()
-
-            # 先从缓存中移除
-            with self._global_lock:
-                if language in self._align_cache:
-                    del self._align_cache[language]
-                    self.logger.debug(f"从缓存中移除对齐模型: {language}")
-
-                    # 更新缓存版本号
-                    self._preload_status["cache_version"] = int(time.time())
-
-            # 委托给模型管理服务删除磁盘文件
-            success = model_mgr.delete_align_model(language)
-
-            if success:
-                self.logger.info(f"已删除对齐模型: {language}")
-            return success
-
-        except Exception as e:
-            self.logger.error(f"删除对齐模型失败: {language} - {e}")
-            return False
-
     def list_all_models(self) -> Dict[str, Any]:
         """
         列出所有模型的状态（整合磁盘状态和缓存状态）
 
         Returns:
-            Dict: 包含whisper和align模型的状态信息
+            Dict: 包含whisper模型的状态信息
         """
         try:
             from services.model_manager_service import get_model_manager
@@ -894,24 +771,10 @@ class ModelPreloadManager:
                 for m in model_mgr.list_whisper_models()
             ]
 
-            align_models = [
-                {
-                    "language": m.language,
-                    "language_name": m.language_name,
-                    "status": m.status,
-                    "download_progress": m.download_progress,
-                    "local_path": m.local_path,
-                    "cached": m.language in self._align_cache
-                }
-                for m in model_mgr.list_align_models()
-            ]
-
             return {
                 "whisper_models": whisper_models,
-                "align_models": align_models,
                 "cache_info": {
                     "whisper_cached": len(self._whisper_cache),
-                    "align_cached": len(self._align_cache),
                     "total_memory_mb": sum(info.memory_size for info in self._whisper_cache.values())
                 }
             }
